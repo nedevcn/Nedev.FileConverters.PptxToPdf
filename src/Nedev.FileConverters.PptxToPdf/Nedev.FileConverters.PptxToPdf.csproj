@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;netstandard2.1</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.0</Version>
+    <Authors>Nedev</Authors>
+    <Description>A high-performance .NET library for converting PPTX (PowerPoint) files to PDF with zero third-party dependencies</Description>
+    <PackageTags>pptx;pdf;converter;powerpoint;file-conversion;net8.0;netstandard2.1</PackageTags>
+    <PackageProjectUrl>https://github.com/nedev/FileConverters.PptxToPdf</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/nedev/FileConverters.PptxToPdf</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nedev.FileConverters.Core" Version="0.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
