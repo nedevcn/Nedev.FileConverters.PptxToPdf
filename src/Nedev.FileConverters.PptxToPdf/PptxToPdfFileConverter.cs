@@ -7,6 +7,11 @@ public class PptxToPdfFileConverter : IFileConverter
 {
     private readonly PptxToPdfConverter _converter;
 
+    static PptxToPdfFileConverter()
+    {
+        PptxToPdfCoreRegistration.EnsureRegisteredSilently();
+    }
+
     public PptxToPdfFileConverter()
     {
         _converter = new PptxToPdfConverter();

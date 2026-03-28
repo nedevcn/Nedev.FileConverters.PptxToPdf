@@ -9,6 +9,7 @@ public class SlideMaster
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/presentationml/2006/main";
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+    public string? SourcePath { get; }
     public List<SlideLayout> Layouts { get; } = new();
     public List<Shape> Shapes { get; } = new();
     public List<Picture> Pictures { get; } = new();
@@ -16,12 +17,14 @@ public class SlideMaster
     public Background? Background { get; private set; }
     public ColorMap? ColorMap { get; private set; }
     public TextStyles? TextStyles { get; private set; }
+    public Theme? Theme { get; set; }
     public long Width { get; }
     public long Height { get; }
 
-    public SlideMaster(XElement element)
+    public SlideMaster(XElement element, string? sourcePath = null)
     {
         _element = element;
+        SourcePath = sourcePath;
 
         // Parse slide size
         var sldSz = element.Parent?.Element(P + "sldSz");
@@ -48,7 +51,7 @@ public class SlideMaster
         var bg = cSld.Element(P + "bg");
         if (bg != null)
         {
-            Background = new Background(bg);
+            Background = new Background(bg, SourcePath);
         }
 
         // Parse color map
@@ -65,19 +68,19 @@ public class SlideMaster
         // Parse shapes
         foreach (var sp in spTree.Elements(P + "sp"))
         {
-            Shapes.Add(new Shape(sp));
+            Shapes.Add(new Shape(sp, SourcePath));
         }
 
         // Parse pictures
         foreach (var pic in spTree.Elements(P + "pic"))
         {
-            Pictures.Add(new Picture(pic));
+            Pictures.Add(new Picture(pic, SourcePath));
         }
 
         // Parse group shapes
         foreach (var grpSp in spTree.Elements(P + "grpSp"))
         {
-            GroupShapes.Add(new GroupShape(grpSp));
+            GroupShapes.Add(new GroupShape(grpSp, SourcePath));
         }
 
         // Parse text styles
@@ -96,17 +99,20 @@ public class SlideLayout
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/presentationml/2006/main";
 
     public string? Name { get; }
+    public string? SourcePath { get; }
     public SlideLayoutType Type { get; }
     public List<Shape> Shapes { get; } = new();
     public List<Picture> Pictures { get; } = new();
     public List<GroupShape> GroupShapes { get; } = new();
     public Background? Background { get; private set; }
     public ColorMap? ColorMap { get; private set; }
+    public SlideMaster? Master { get; set; }
 
-    public SlideLayout(XElement element)
+    public SlideLayout(XElement element, string? sourcePath = null)
     {
         _element = element;
         Name = element.Attribute("name")?.Value;
+        SourcePath = sourcePath;
         Type = ParseLayoutType(element.Attribute("type")?.Value);
 
         Parse();
@@ -121,19 +127,12 @@ public class SlideLayout
         var bg = cSld.Element(P + "bg");
         if (bg != null)
         {
-            Background = new Background(bg);
+            Background = new Background(bg, SourcePath);
         }
 
         // Parse color map
         var clrMapOvr = _element.Element(P + "clrMapOvr");
-        if (clrMapOvr != null)
-        {
-            var clrMap = clrMapOvr.Element(A + "clrMap");
-            if (clrMap != null)
-            {
-                ColorMap = new ColorMap(clrMap);
-            }
-        }
+        ColorMap = ColorMap.FromOverride(clrMapOvr);
 
         // Parse shape tree
         var spTree = cSld.Element(P + "spTree");
@@ -142,19 +141,19 @@ public class SlideLayout
         // Parse shapes
         foreach (var sp in spTree.Elements(P + "sp"))
         {
-            Shapes.Add(new Shape(sp));
+            Shapes.Add(new Shape(sp, SourcePath));
         }
 
         // Parse pictures
         foreach (var pic in spTree.Elements(P + "pic"))
         {
-            Pictures.Add(new Picture(pic));
+            Pictures.Add(new Picture(pic, SourcePath));
         }
 
         // Parse group shapes
         foreach (var grpSp in spTree.Elements(P + "grpSp"))
         {
-            GroupShapes.Add(new GroupShape(grpSp));
+            GroupShapes.Add(new GroupShape(grpSp, SourcePath));
         }
     }
 
@@ -208,6 +207,22 @@ public class ColorMap
         ParseMappings();
     }
 
+    public static ColorMap? FromElement(XElement? element)
+    {
+        return element == null ? null : new ColorMap(element);
+    }
+
+    public static ColorMap? FromOverride(XElement? element)
+    {
+        if (element == null)
+            return null;
+
+        var mappingElement = element.Element(A + "overrideClrMapping")
+            ?? element.Element(A + "clrMap");
+
+        return mappingElement == null ? null : new ColorMap(mappingElement);
+    }
+
     private void ParseMappings()
     {
         // Background colors
@@ -234,6 +249,132 @@ public class ColorMap
     public string GetMapping(string colorName)
     {
         return Mappings.TryGetValue(colorName, out var mapping) ? mapping : colorName;
+    }
+
+    public SchemeColor ResolveSchemeColor(SchemeColor schemeColor)
+    {
+        if (!TryGetSchemeColorName(schemeColor, out var schemeColorName))
+            return schemeColor;
+
+        var mappedColorName = GetMapping(schemeColorName);
+        return TryParseSchemeColor(mappedColorName, out var mappedSchemeColor)
+            ? mappedSchemeColor
+            : schemeColor;
+    }
+
+    private static bool TryGetSchemeColorName(SchemeColor schemeColor, out string schemeColorName)
+    {
+        switch (schemeColor)
+        {
+            case SchemeColor.Background1:
+                schemeColorName = "bg1";
+                return true;
+            case SchemeColor.Text1:
+                schemeColorName = "tx1";
+                return true;
+            case SchemeColor.Background2:
+                schemeColorName = "bg2";
+                return true;
+            case SchemeColor.Text2:
+                schemeColorName = "tx2";
+                return true;
+            case SchemeColor.Accent1:
+                schemeColorName = "accent1";
+                return true;
+            case SchemeColor.Accent2:
+                schemeColorName = "accent2";
+                return true;
+            case SchemeColor.Accent3:
+                schemeColorName = "accent3";
+                return true;
+            case SchemeColor.Accent4:
+                schemeColorName = "accent4";
+                return true;
+            case SchemeColor.Accent5:
+                schemeColorName = "accent5";
+                return true;
+            case SchemeColor.Accent6:
+                schemeColorName = "accent6";
+                return true;
+            case SchemeColor.Hyperlink:
+                schemeColorName = "hlink";
+                return true;
+            case SchemeColor.FollowedHyperlink:
+                schemeColorName = "folHlink";
+                return true;
+            case SchemeColor.Dark1:
+                schemeColorName = "dk1";
+                return true;
+            case SchemeColor.Light1:
+                schemeColorName = "lt1";
+                return true;
+            case SchemeColor.Dark2:
+                schemeColorName = "dk2";
+                return true;
+            case SchemeColor.Light2:
+                schemeColorName = "lt2";
+                return true;
+            default:
+                schemeColorName = string.Empty;
+                return false;
+        }
+    }
+
+    private static bool TryParseSchemeColor(string? value, out SchemeColor schemeColor)
+    {
+        switch (value)
+        {
+            case "bg1":
+                schemeColor = SchemeColor.Background1;
+                return true;
+            case "tx1":
+                schemeColor = SchemeColor.Text1;
+                return true;
+            case "bg2":
+                schemeColor = SchemeColor.Background2;
+                return true;
+            case "tx2":
+                schemeColor = SchemeColor.Text2;
+                return true;
+            case "accent1":
+                schemeColor = SchemeColor.Accent1;
+                return true;
+            case "accent2":
+                schemeColor = SchemeColor.Accent2;
+                return true;
+            case "accent3":
+                schemeColor = SchemeColor.Accent3;
+                return true;
+            case "accent4":
+                schemeColor = SchemeColor.Accent4;
+                return true;
+            case "accent5":
+                schemeColor = SchemeColor.Accent5;
+                return true;
+            case "accent6":
+                schemeColor = SchemeColor.Accent6;
+                return true;
+            case "hlink":
+                schemeColor = SchemeColor.Hyperlink;
+                return true;
+            case "folHlink":
+                schemeColor = SchemeColor.FollowedHyperlink;
+                return true;
+            case "dk1":
+                schemeColor = SchemeColor.Dark1;
+                return true;
+            case "lt1":
+                schemeColor = SchemeColor.Light1;
+                return true;
+            case "dk2":
+                schemeColor = SchemeColor.Dark2;
+                return true;
+            case "lt2":
+                schemeColor = SchemeColor.Light2;
+                return true;
+            default:
+                return Enum.TryParse(value, true, out schemeColor);
+        }
     }
 }
 
@@ -269,6 +410,16 @@ public class TextStyles
             OtherStyle = new TextStyle(otherStyle);
         }
     }
+
+    public TextStyle? GetStyleForPlaceholder(PlaceholderType placeholderType)
+    {
+        return placeholderType switch
+        {
+            PlaceholderType.Title or PlaceholderType.CenterTitle or PlaceholderType.SubTitle or PlaceholderType.VerticalTitle => TitleStyle ?? OtherStyle ?? BodyStyle,
+            PlaceholderType.Body or PlaceholderType.VerticalBody => BodyStyle ?? OtherStyle ?? TitleStyle,
+            _ => OtherStyle ?? BodyStyle ?? TitleStyle
+        };
+    }
 }
 
 public class TextStyle
@@ -290,6 +441,13 @@ public class TextStyle
                 Levels.Add(new LevelStyle(lvl, i));
             }
         }
+    }
+
+    public LevelStyle? GetLevelStyle(int paragraphLevel)
+    {
+        var targetLevel = Math.Clamp(paragraphLevel + 1, 1, 9);
+        return Levels.FirstOrDefault(level => level.Level == targetLevel)
+            ?? Levels.OrderBy(level => level.Level).FirstOrDefault();
     }
 }
 
@@ -366,7 +524,8 @@ public class TextParagraphProperties
                 Bullet = new BulletStyle
                 {
                     Type = BulletType.AutoNumber,
-                    AutoNumberType = buAutoNum.Attribute("type")?.Value
+                    AutoNumberType = buAutoNum.Attribute("type")?.Value,
+                    StartAt = int.TryParse(buAutoNum.Attribute("startAt")?.Value, out var startAt) ? startAt : null
                 };
             }
 
@@ -385,6 +544,27 @@ public class TextParagraphProperties
             {
                 Bullet = new BulletStyle { Type = BulletType.Blip };
             }
+        }
+
+        var buSzPct = element.Element(A + "buSzPct");
+        if (buSzPct != null)
+        {
+            Bullet ??= new BulletStyle();
+            Bullet.Size = int.TryParse(buSzPct.Attribute("val")?.Value, out var size) ? size / 100000.0 : null;
+        }
+
+        var buFont = element.Element(A + "buFont");
+        if (buFont != null)
+        {
+            Bullet ??= new BulletStyle();
+            Bullet.Font = buFont.Attribute("typeface")?.Value;
+        }
+
+        var buClr = element.Element(A + "buClr");
+        if (buClr != null)
+        {
+            Bullet ??= new BulletStyle();
+            Bullet.Color = Shape.ParseColor(buClr);
         }
 
         // Parse default run properties

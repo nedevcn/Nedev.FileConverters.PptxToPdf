@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Nedev.FileConverters.PptxToPdf;
 using Nedev.FileConverters.PptxToPdf.Image;
 using Nedev.FileConverters.PptxToPdf.Pptx;
 
@@ -10,7 +11,7 @@ public class PdfRenderer
     private readonly PdfDocument _document;
     private readonly Dictionary<string, PdfFont> _fonts = new();
     private readonly FontEmbedder _fontEmbedder;
-    private int _imageCounter;
+    private PdfPage? _currentPage;
 
     public PdfRenderer(PdfDocument document)
     {
@@ -20,75 +21,109 @@ public class PdfRenderer
 
     public void RenderSlide(PdfPage page, Slide slide, PptxDocument pptx)
     {
-        var content = new PdfContent(_document.GetNextObjectNumber());
-        _document.AddObject(content);
-        page.Content = content;
-
-        var sb = new StringBuilder();
-
-        sb.AppendLine("q");
-
-        if (slide.Background?.Color != null)
+        _currentPage = page;
+        try
         {
-            RenderBackground(sb, slide.Background.Color.Value, page.Width, page.Height);
-        }
+            var content = new PdfContent(_document.GetNextObjectNumber());
+            _document.AddObject(content);
+            page.Content = content;
 
-        // Render connectors first (behind shapes)
-        foreach (var connector in slide.Connectors)
+            var sb = new StringBuilder();
+
+            sb.AppendLine("q");
+
+            var slideTheme = slide.GetEffectiveTheme(pptx.Theme);
+            var background = slide.GetEffectiveBackground();
+            var backgroundFill = background?.ResolveFill(slideTheme);
+            var backgroundSourcePath = background?.ResolveSourcePath(slideTheme) ?? slide.SourcePath;
+            if (backgroundFill != null)
+            {
+                RenderBackground(sb, backgroundFill, backgroundSourcePath, page.Width, page.Height, pptx, page);
+            }
+
+            // Render connectors first (behind shapes)
+            foreach (var connector in slide.Connectors)
+            {
+                RenderConnector(sb, connector, page.Height, page);
+            }
+
+            // Render shapes
+            foreach (var shape in slide.GetRenderableShapes())
+            {
+                RenderShape(sb, shape, page.Height, slide, pptx, page);
+            }
+
+            // Render pictures
+            foreach (var picture in slide.GetRenderablePictures())
+            {
+                RenderPicture(sb, picture, slide, page.Height, pptx, page);
+            }
+
+            // Render charts
+            foreach (var chart in slide.Charts)
+            {
+                RenderChart(sb, chart, page.Height, page);
+            }
+
+            // Render SmartArt
+            foreach (var smartArt in slide.SmartArts)
+            {
+                RenderSmartArt(sb, smartArt, page.Height);
+            }
+
+            // Render group shapes
+            foreach (var group in slide.GetRenderableGroupShapes())
+            {
+                RenderGroupShape(sb, group, slide, page.Height, pptx, page);
+            }
+
+            // Render tables
+            foreach (var table in slide.Tables)
+            {
+                RenderTable(sb, table, page.Height, page);
+            }
+
+            sb.AppendLine("Q");
+
+            var operations = sb.ToString();
+            var bytes = Encoding.UTF8.GetBytes(operations);
+            content.Stream.Write(bytes, 0, bytes.Length);
+        }
+        finally
         {
-            RenderConnector(sb, connector, page.Height);
+            _currentPage = null;
         }
-
-        // Render shapes
-        foreach (var shape in slide.Shapes)
-        {
-            RenderShape(sb, shape, page.Height, page);
-        }
-
-        // Render pictures
-        foreach (var picture in slide.Pictures)
-        {
-            RenderPicture(sb, picture, page.Height, pptx, page);
-        }
-
-        // Render charts
-        foreach (var chart in slide.Charts)
-        {
-            RenderChart(sb, chart, page.Height);
-        }
-
-        // Render SmartArt
-        foreach (var smartArt in slide.SmartArts)
-        {
-            RenderSmartArt(sb, smartArt, page.Height);
-        }
-
-        // Render group shapes
-        foreach (var group in slide.GroupShapes)
-        {
-            RenderGroupShape(sb, group, page.Height, pptx, page);
-        }
-
-        // Render tables
-        foreach (var table in slide.Tables)
-        {
-            RenderTable(sb, table, page.Height, page);
-        }
-
-        sb.AppendLine("Q");
-
-        var operations = sb.ToString();
-        var bytes = Encoding.UTF8.GetBytes(operations);
-        content.Stream.Write(bytes, 0, bytes.Length);
     }
 
-    private void RenderBackground(StringBuilder sb, Color color, double pageWidth, double pageHeight)
+    private void RenderBackground(StringBuilder sb, Fill fill, string sourcePartPath, double pageWidth, double pageHeight, PptxDocument pptx, PdfPage page)
     {
-        SetColor(sb, color);
-        sb.AppendLine($"0 0 {pageWidth:F2} {pageHeight:F2} re f");
+        switch (fill.Type)
+        {
+            case FillType.Solid:
+                sb.AppendLine("q");
+                SetColor(sb, page, fill.Color);
+                sb.AppendLine($"0 0 {pageWidth:F2} {pageHeight:F2} re f");
+                sb.AppendLine("Q");
+                break;
+
+            case FillType.Gradient:
+                RenderGradientFill(sb, fill, 0, 0, pageWidth, pageHeight, ShapeType.Rectangle, page);
+                break;
+
+            case FillType.Pattern:
+                sb.AppendLine("q");
+                SetColor(sb, page, fill.PatternForegroundColor);
+                sb.AppendLine($"0 0 {pageWidth:F2} {pageHeight:F2} re f");
+                sb.AppendLine("Q");
+                break;
+
+            case FillType.Picture:
+                RenderPictureFill(sb, fill, 0, 0, pageWidth, pageHeight, ShapeType.Rectangle, sourcePartPath, pptx, page);
+                break;
+        }
     }
 
-    private void RenderConnector(StringBuilder sb, Connector connector, double pageHeight)
+    private void RenderConnector(StringBuilder sb, Connector connector, double pageHeight, PdfPage page)
     {
         if (connector.Outline == null || connector.Outline.Width <= 0) return;
 
@@ -97,8 +132,9 @@ public class PdfRenderer
         var x2 = x1 + connector.Bounds.WidthPoints;
         var y2 = y1 - connector.Bounds.HeightPoints;
 
+        sb.AppendLine("q");
         var strokeColor = connector.Outline.Color ?? Color.Black;
-        SetStrokeColor(sb, strokeColor);
+        SetStrokeColor(sb, page, strokeColor);
         sb.AppendLine($"{connector.Outline.Width / 12700.0 * 72:F2} w");
 
         // Set dash pattern if needed
@@ -116,13 +152,14 @@ public class PdfRenderer
         {
             sb.AppendLine("[] 0 d");
         }
+        sb.AppendLine("Q");
     }
 
-    private void RenderShape(StringBuilder sb, Shape shape, double pageHeight, PdfPage page)
+    private void RenderShape(StringBuilder sb, Shape shape, double pageHeight, Slide slide, PptxDocument pptx, PdfPage page)
     {
         if (shape.ShapeType == ShapeType.Line)
         {
-            RenderLine(sb, shape, pageHeight);
+            RenderLine(sb, shape, pageHeight, page);
             return;
         }
 
@@ -147,10 +184,10 @@ public class PdfRenderer
         }
 
         // Render fill
-        RenderShapeFill(sb, shape, x, y, w, h);
+        RenderShapeFill(sb, shape, x, y, w, h, slide, pptx, page);
 
         // Render outline
-        RenderShapeOutline(sb, shape, x, y, w, h);
+        RenderShapeOutline(sb, shape, x, y, w, h, page);
 
         // Render post-shape effects (like inner shadow, soft edges, reflection)
         if (shape.Effects != null)
@@ -201,36 +238,40 @@ public class PdfRenderer
         }
     }
 
-    private void RenderShapeFill(StringBuilder sb, Shape shape, double x, double y, double w, double h)
+    private void RenderShapeFill(StringBuilder sb, Shape shape, double x, double y, double w, double h, Slide slide, PptxDocument pptx, PdfPage page)
     {
         if (shape.Fill == null) return;
 
         switch (shape.Fill.Type)
         {
             case FillType.Solid:
-                SetColor(sb, shape.Fill.Color);
+                sb.AppendLine("q");
+                SetColor(sb, page, shape.Fill.Color);
                 RenderShapePath(sb, shape.ShapeType, x, y, w, h, true);
+                sb.AppendLine("Q");
                 break;
 
             case FillType.Gradient:
                 // Render gradient fill using striped approximation
                 if (shape.Fill.GradientStops?.Any() == true)
                 {
-                    RenderGradientFill(sb, shape.Fill, x, y, w, h, shape.ShapeType);
+                    RenderGradientFill(sb, shape.Fill, x, y, w, h, shape.ShapeType, page);
                 }
                 break;
 
             case FillType.Pattern:
                 // Pattern fill - use foreground color
-                SetColor(sb, shape.Fill.PatternForegroundColor);
+                sb.AppendLine("q");
+                SetColor(sb, page, shape.Fill.PatternForegroundColor);
                 RenderShapePath(sb, shape.ShapeType, x, y, w, h, true);
+                sb.AppendLine("Q");
                 break;
 
             case FillType.Picture:
                 // Picture fill
-                if (shape.Fill.PictureFill != null && shape.Fill.PictureFill.Blip != null)
+                if (!string.IsNullOrEmpty(shape.Fill.PictureRelationshipId))
                 {
-                    RenderPictureFill(sb, shape.Fill, x, y, w, h, shape.ShapeType);
+                    RenderPictureFill(sb, shape.Fill, x, y, w, h, shape.ShapeType, shape.SourcePath ?? slide.SourcePath, pptx, page);
                 }
                 break;
 
@@ -240,12 +281,13 @@ public class PdfRenderer
         }
     }
 
-    private void RenderShapeOutline(StringBuilder sb, Shape shape, double x, double y, double w, double h)
+    private void RenderShapeOutline(StringBuilder sb, Shape shape, double x, double y, double w, double h, PdfPage page)
     {
         if (shape.Outline == null || shape.Outline.Width <= 0) return;
 
+        sb.AppendLine("q");
         var strokeColor = shape.Outline.Color ?? Color.Black;
-        SetStrokeColor(sb, strokeColor);
+        SetStrokeColor(sb, page, strokeColor);
         sb.AppendLine($"{shape.Outline.Width / 12700.0 * 72:F2} w");
 
         // Set line cap
@@ -281,6 +323,7 @@ public class PdfRenderer
         {
             sb.AppendLine("[] 0 d");
         }
+        sb.AppendLine("Q");
     }
 
     private void RenderShapePath(StringBuilder sb, ShapeType shapeType, double x, double y, double w, double h, bool fill)
@@ -405,7 +448,7 @@ public class PdfRenderer
         sb.AppendLine($"1 0 0 1 {-cx:F2} {-cy:F2} cm");
     }
 
-    private void RenderLine(StringBuilder sb, Shape shape, double pageHeight)
+    private void RenderLine(StringBuilder sb, Shape shape, double pageHeight, PdfPage page)
     {
         if (shape.Outline == null || shape.Outline.Width <= 0) return;
 
@@ -414,12 +457,14 @@ public class PdfRenderer
         var x2 = x1 + shape.Bounds.WidthPoints;
         var y2 = y1 - shape.Bounds.HeightPoints;
 
+        sb.AppendLine("q");
         var strokeColor = shape.Outline.Color ?? Color.Black;
-        SetStrokeColor(sb, strokeColor);
+        SetStrokeColor(sb, page, strokeColor);
         sb.AppendLine($"{shape.Outline.Width / 12700.0 * 72:F2} w");
 
         sb.AppendLine($"{x1:F2} {y1:F2} m");
         sb.AppendLine($"{x2:F2} {y2:F2} l S");
+        sb.AppendLine("Q");
     }
 
     private void RenderEllipse(StringBuilder sb, double x, double y, double w, double h, bool fill)
@@ -670,188 +715,605 @@ public class PdfRenderer
     {
         if (shape.Paragraphs == null || !shape.Paragraphs.Any()) return;
 
-        var x = shape.Bounds.XPoints + (shape.TextProperties?.LeftInset ?? 0.1) * 72;
-        var y = pageHeight - shape.Bounds.YPoints - shape.Bounds.HeightPoints + (shape.TextProperties?.TopInset ?? 0.05) * 72;
-        var width = shape.Bounds.WidthPoints - (shape.TextProperties?.LeftInset ?? 0.1) * 72 - (shape.TextProperties?.RightInset ?? 0.1) * 72;
-        var height = shape.Bounds.HeightPoints - (shape.TextProperties?.TopInset ?? 0.05) * 72 - (shape.TextProperties?.BottomInset ?? 0.05) * 72;
-
-        double currentY = y;
+        var textProperties = shape.TextProperties;
+        var leftInset = (textProperties?.LeftInset ?? 0.1) * 72;
+        var topInset = (textProperties?.TopInset ?? 0.05) * 72;
+        var rightInset = (textProperties?.RightInset ?? 0.1) * 72;
+        var bottomInset = (textProperties?.BottomInset ?? 0.05) * 72;
+        var x = shape.Bounds.XPoints + leftInset;
+        var textTop = pageHeight - shape.Bounds.YPoints - topInset;
+        var width = Math.Max(1, shape.Bounds.WidthPoints - leftInset - rightInset);
+        var height = Math.Max(0, shape.Bounds.HeightPoints - topInset - bottomInset);
+        var defaultFontSize = textProperties?.FontSize ?? 18;
+        var contentHeight = EstimateTextContentHeight(shape.Paragraphs, width, defaultFontSize, textProperties);
+        double currentY = ResolveTextStartY(textTop, height, contentHeight, textProperties?.Anchor ?? TextAnchor.Top);
+        var autoNumberState = new Dictionary<int, int>();
 
         foreach (var paragraph in shape.Paragraphs)
         {
-            // Apply space before
-            if (paragraph.SpaceBefore != null)
-            {
-                if (paragraph.SpaceBefore.Percent.HasValue)
-                    currentY += 12 * (paragraph.SpaceBefore.Percent.Value / 100);
-                else if (paragraph.SpaceBefore.Points.HasValue)
-                    currentY += paragraph.SpaceBefore.Points.Value;
-            }
+            var paragraphLineHeight = GetParagraphLineHeight(paragraph, defaultFontSize, textProperties);
+            currentY -= ResolveParagraphSpacing(paragraph.SpaceBefore, paragraphLineHeight);
 
-            // Calculate paragraph indent
-            double paragraphX = x + (paragraph.MarginLeft / 914400.0 * 72) + (paragraph.Indent / 914400.0 * 72);
-
-            // Render runs with formatting
-            double currentX = paragraphX;
-            double lineHeight = 18; // Default line height
+            double firstLineX = GetParagraphFirstLineX(x, paragraph);
+            double continuationX = GetParagraphContinuationX(x, paragraph);
+            double firstLineWidth = GetParagraphFirstLineWidth(paragraph, width);
+            double continuationWidth = GetParagraphContinuationWidth(paragraph, width);
+            double bulletX = GetParagraphBulletX(x, paragraph);
+            var paragraphAlignment = paragraph.Alignment ?? textProperties?.Alignment ?? TextAlignment.Left;
+            var bulletMarker = ResolveBulletMarker(paragraph, autoNumberState);
+            var paragraphLineIndex = 0;
 
             foreach (var run in paragraph.Runs)
             {
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
-                var runFontName = run.Properties?.FontFamily ?? shape.TextProperties?.FontFamily ?? "Arial";
-                var runFontSize = run.Properties?.FontSize ?? shape.TextProperties?.FontSize ?? 18;
-                var runFontColor = run.Properties?.Color ?? shape.TextProperties?.Color ?? Color.Black;
-
-                lineHeight = runFontSize * 1.2;
-
-                // Check if text contains Chinese characters
-                bool isChinese = ContainsChineseCharacters(run.Text);
-                
-                // Get or create font
-                PdfFont font;
-                if (isChinese)
-                {
-                    // Use a widely supported Chinese font
-                    // Try using system font if available
-                    font = GetOrCreateFont("MicrosoftYaHei", page, true);
-                }
-                else
-                {
-                    font = GetOrCreateFont(runFontName, page);
-                }
-
-                // Apply text color
-                SetTextColor(sb, runFontColor);
-
-                // Start text object
-                sb.AppendLine("BT");
-
-                // Set font and size
-                string fontName = $"/F{font.Number}";
-                string fontStyle = "";
-                
-                // Apply font styles
-                if (run.Properties?.Bold == true && run.Properties?.Italic == true)
-                {
-                    fontStyle = "BoldItalic";
-                    // Note: We'd need to handle bold/italic fonts properly
-                }
-                else if (run.Properties?.Bold == true)
-                {
-                    fontStyle = "Bold";
-                }
-                else if (run.Properties?.Italic == true)
-                {
-                    fontStyle = "Italic";
-                }
-
-                sb.AppendLine($"{fontName} {runFontSize} Tf");
-
-                // Handle text alignment
-                string alignment = paragraph.Alignment switch
-                {
-                    TextAlignment.Center => "1 0 0 1 0 0 Tm 0 -1 1 0 0 0 Tm",
-                    TextAlignment.Right => $"1 0 0 1 {paragraphX + width} 0 Tm 0 -1 1 0 0 0 Tm",
-                    _ => ""
-                };
-
-                if (!string.IsNullOrEmpty(alignment))
-                {
-                    sb.AppendLine(alignment);
-                }
-
-                // Handle underline
-                if (run.Properties?.Underline != UnderlineType.None)
-                {
-                    // PDF doesn't support underline directly in text state
-                    // We'll need to draw a line under the text
-                }
-
-                // Handle strikethrough
-                if (run.Properties?.Strike != StrikeType.None)
-                {
-                    // PDF doesn't support strikethrough directly
-                    // We'll need to draw a line through the text
-                }
+                var runFontName = run.Properties?.FontFamily ?? textProperties?.FontFamily ?? "Arial";
+                var runFontSize = ResolveEffectiveFontSize(run.Properties?.FontSize ?? defaultFontSize, textProperties);
+                var runFontColor = run.Properties?.Color ?? textProperties?.Color ?? Color.Black;
+                var lineHeight = ResolveLineHeight(runFontSize, textProperties);
 
                 // Handle baseline offset (superscript/subscript)
-                if (run.Properties?.BaselineOffset != 0)
+                double baselineOffset = 0;
+                var baselineOffsetValue = run.Properties?.BaselineOffset;
+                if (baselineOffsetValue is double offsetValue && offsetValue != 0)
                 {
-                    double offset = run.Properties.BaselineOffset * runFontSize;
-                    sb.AppendLine($"1 0 0 1 0 {offset} Tm");
+                    baselineOffset = offsetValue * runFontSize;
                 }
 
                 // Handle text wrapping
-                var wrappedText = WrapText(run.Text, width, runFontSize);
+                var wrappedText = WrapText(
+                    run.Text,
+                    paragraphLineIndex == 0 ? firstLineWidth : continuationWidth,
+                    continuationWidth,
+                    runFontSize);
                 foreach (var line in wrappedText)
                 {
-                    sb.AppendLine($"{currentX:F2} {currentY:F2} Td");
-                    sb.AppendLine($"({EscapeText(line, isChinese)}) Tj");
-                    currentY += lineHeight;
-                    currentX = paragraphX;
+                    currentY -= lineHeight;
+
+                    if (paragraphLineIndex == 0 && !string.IsNullOrEmpty(bulletMarker))
+                    {
+                        var bulletFontSize = Math.Max(1, (int)Math.Round(runFontSize * ResolveBulletScale(paragraph)));
+                        var bulletColor = paragraph.BulletColor ?? runFontColor;
+                        var bulletFontName = paragraph.BulletFont ?? runFontName;
+                        RenderTextFragment(sb, page, bulletMarker, bulletFontName, bulletFontSize, bulletColor, bulletX, currentY + baselineOffset);
+                    }
+
+                    var lineStartX = paragraphLineIndex == 0 ? firstLineX : continuationX;
+                    var lineWidth = paragraphLineIndex == 0 ? firstLineWidth : continuationWidth;
+                    var lineX = ResolveAlignedTextX(lineStartX, lineWidth, line, runFontSize, paragraphAlignment);
+                    RenderTextFragment(sb, page, line, runFontName, runFontSize, runFontColor, lineX, currentY + baselineOffset);
+                    paragraphLineIndex++;
                 }
-
-                // End text object
-                sb.AppendLine("ET");
             }
 
-            // Apply space after
-            if (paragraph.SpaceAfter != null)
-            {
-                if (paragraph.SpaceAfter.Percent.HasValue)
-                    currentY += lineHeight * (paragraph.SpaceAfter.Percent.Value / 100);
-                else if (paragraph.SpaceAfter.Points.HasValue)
-                    currentY += paragraph.SpaceAfter.Points.Value;
-            }
-
-            // Apply line spacing
-            if (paragraph.LineSpacing != null)
-            {
-                if (paragraph.LineSpacing.Percent.HasValue)
-                    currentY += lineHeight * (paragraph.LineSpacing.Percent.Value / 100 - 1);
-                else if (paragraph.LineSpacing.Points.HasValue)
-                    currentY += paragraph.LineSpacing.Points.Value - lineHeight;
-            }
+            currentY -= ResolveParagraphSpacing(paragraph.SpaceAfter, paragraphLineHeight);
+            currentY -= ResolveLineSpacingAdjustment(paragraph.LineSpacing, paragraphLineHeight);
         }
     }
 
-    private List<string> WrapText(string text, double width, double fontSize)
+    private static int ResolveEffectiveFontSize(int fontSize, TextProperties? textProperties)
     {
-        var lines = new List<string>();
-        var words = text.Split(' ');
-        var currentLine = new System.Text.StringBuilder();
+        if (textProperties?.AutoFit != TextAutoFit.Normal)
+            return Math.Max(1, fontSize);
 
-        foreach (var word in words)
+        var fontScale = textProperties.FontScale > 0 ? textProperties.FontScale : 1;
+        return Math.Max(1, (int)Math.Round(fontSize * fontScale, MidpointRounding.AwayFromZero));
+    }
+
+    private static double ResolveLineHeight(double fontSize, TextProperties? textProperties)
+    {
+        var lineHeight = fontSize * 1.2;
+        if (textProperties?.AutoFit != TextAutoFit.Normal)
+            return lineHeight;
+
+        var reduction = Math.Clamp(textProperties.LineSpaceReduction, 0, 1);
+        return Math.Max(1, lineHeight * (1 - reduction));
+    }
+
+    private List<string> WrapText(string text, double width, double fontSize, bool allowWrap = true)
+    {
+        return WrapText(text, width, width, fontSize, allowWrap);
+    }
+
+    private List<string> WrapText(string text, double firstLineWidth, double continuationWidth, double fontSize, bool allowWrap = true)
+    {
+        if (string.IsNullOrEmpty(text))
+            return new List<string> { string.Empty };
+
+        if (firstLineWidth <= 0 && continuationWidth <= 0)
+            return new List<string> { text };
+
+        var normalizedText = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        if (!allowWrap)
+            return normalizedText.Split('\n').ToList();
+
+        var lines = new List<string>();
+        var firstVisualLine = true;
+
+        foreach (var rawLine in normalizedText.Split('\n'))
         {
-            // Simple word wrapping - estimate width based on average character width
-            double currentWidth = (currentLine.Length + word.Length + 1) * (fontSize * 0.5);
-            
-            if (currentWidth <= width)
-            {
-                if (currentLine.Length > 0)
-                    currentLine.Append(' ');
-                currentLine.Append(word);
-            }
-            else
-            {
-                lines.Add(currentLine.ToString());
-                currentLine.Clear();
-                currentLine.Append(word);
-            }
+            WrapRawLine(rawLine, firstLineWidth, continuationWidth, fontSize, lines, ref firstVisualLine);
+        }
+
+        return lines.Count > 0 ? lines : new List<string> { string.Empty };
+    }
+
+    private void WrapRawLine(
+        string rawLine,
+        double firstLineWidth,
+        double continuationWidth,
+        double fontSize,
+        List<string> lines,
+        ref bool firstVisualLine)
+    {
+        if (rawLine.Length == 0)
+        {
+            lines.Add(string.Empty);
+            firstVisualLine = false;
+            return;
+        }
+
+        var currentLine = new StringBuilder();
+        var currentWidth = firstVisualLine ? firstLineWidth : continuationWidth;
+        foreach (var token in TokenizeForWrapping(rawLine))
+        {
+            AppendWrappedToken(currentLine, token, fontSize, lines, continuationWidth, ref currentWidth, ref firstVisualLine);
         }
 
         if (currentLine.Length > 0)
-            lines.Add(currentLine.ToString());
-
-        return lines;
+        {
+            lines.Add(currentLine.ToString().TrimEnd());
+            firstVisualLine = false;
+        }
     }
 
-    private void RenderPicture(StringBuilder sb, Picture picture, double pageHeight, PptxDocument pptx, PdfPage page)
+    private IEnumerable<string> TokenizeForWrapping(string text)
+    {
+        var token = new StringBuilder();
+        bool? currentWhitespace = null;
+
+        foreach (var character in text)
+        {
+            var isWhitespace = character == ' ' || character == '\t';
+            if (currentWhitespace.HasValue && currentWhitespace.Value != isWhitespace)
+            {
+                yield return token.ToString();
+                token.Clear();
+            }
+
+            token.Append(character);
+            currentWhitespace = isWhitespace;
+        }
+
+        if (token.Length > 0)
+        {
+            yield return token.ToString();
+        }
+    }
+
+    private void AppendWrappedToken(
+        StringBuilder currentLine,
+        string token,
+        double fontSize,
+        List<string> lines,
+        double continuationWidth,
+        ref double currentWidth,
+        ref bool firstVisualLine)
+    {
+        if (token.Length == 0)
+            return;
+
+        if (currentLine.Length == 0 && string.IsNullOrWhiteSpace(token))
+            return;
+
+        var candidate = currentLine.Length == 0 ? token.TrimStart() : currentLine.ToString() + token;
+        if (candidate.Length > 0 && CanFitWrappedText(candidate, fontSize, currentWidth))
+        {
+            if (currentLine.Length == 0)
+            {
+                currentLine.Append(candidate);
+            }
+            else
+            {
+                currentLine.Append(token);
+            }
+
+            return;
+        }
+
+        if (currentLine.Length > 0)
+        {
+            lines.Add(currentLine.ToString().TrimEnd());
+            currentLine.Clear();
+            currentWidth = continuationWidth;
+            firstVisualLine = false;
+        }
+
+        AppendTokenByCharacter(currentLine, token.TrimStart(), fontSize, lines, continuationWidth, ref currentWidth, ref firstVisualLine);
+    }
+
+    private void AppendTokenByCharacter(
+        StringBuilder currentLine,
+        string token,
+        double fontSize,
+        List<string> lines,
+        double continuationWidth,
+        ref double currentWidth,
+        ref bool firstVisualLine)
+    {
+        foreach (var character in token)
+        {
+            if (currentLine.Length == 0 && char.IsWhiteSpace(character))
+                continue;
+
+            var candidate = currentLine.ToString() + character;
+            if (currentLine.Length == 0 || CanFitWrappedText(candidate, fontSize, currentWidth))
+            {
+                currentLine.Append(character);
+                continue;
+            }
+
+            lines.Add(currentLine.ToString().TrimEnd());
+            currentLine.Clear();
+            currentWidth = continuationWidth;
+            firstVisualLine = false;
+            if (!char.IsWhiteSpace(character))
+            {
+                currentLine.Append(character);
+            }
+        }
+    }
+
+    private double EstimateTextContentHeight(
+        IEnumerable<Paragraph> paragraphs,
+        double width,
+        int defaultFontSize,
+        TextProperties? textProperties = null,
+        bool allowWrap = true)
+    {
+        double contentHeight = 0;
+
+        foreach (var paragraph in paragraphs)
+        {
+            var paragraphLineHeight = GetParagraphLineHeight(paragraph, defaultFontSize, textProperties);
+            contentHeight += ResolveParagraphSpacing(paragraph.SpaceBefore, paragraphLineHeight);
+
+            var firstLineWidth = GetParagraphFirstLineWidth(paragraph, width);
+            var continuationWidth = GetParagraphContinuationWidth(paragraph, width);
+            var paragraphLineIndex = 0;
+            foreach (var run in paragraph.Runs.Where(run => !string.IsNullOrEmpty(run.Text)))
+            {
+                var runFontSize = ResolveEffectiveFontSize(run.Properties?.FontSize ?? defaultFontSize, textProperties);
+                var lineHeight = ResolveLineHeight(runFontSize, textProperties);
+                var wrappedLines = WrapText(
+                    run.Text!,
+                    paragraphLineIndex == 0 ? firstLineWidth : continuationWidth,
+                    continuationWidth,
+                    runFontSize,
+                    allowWrap);
+                contentHeight += wrappedLines.Count * lineHeight;
+                paragraphLineIndex += wrappedLines.Count;
+            }
+
+            contentHeight += ResolveParagraphSpacing(paragraph.SpaceAfter, paragraphLineHeight);
+            contentHeight += ResolveLineSpacingAdjustment(paragraph.LineSpacing, paragraphLineHeight);
+        }
+
+        return contentHeight;
+    }
+
+    private static double ResolveTextStartY(double textTop, double availableHeight, double contentHeight, TextAnchor anchor)
+    {
+        var offset = anchor switch
+        {
+            TextAnchor.Bottom or TextAnchor.BottomCentered => Math.Max(0, availableHeight - contentHeight),
+            TextAnchor.Middle or TextAnchor.MiddleCentered => Math.Max(0, (availableHeight - contentHeight) / 2),
+            _ => 0
+        };
+
+        return textTop - offset;
+    }
+
+    private static double ResolveParagraphSpacing(Spacing? spacing, double referenceLineHeight)
+    {
+        if (spacing == null)
+            return 0;
+
+        if (spacing.Points.HasValue)
+            return spacing.Points.Value;
+
+        if (spacing.Percent.HasValue)
+            return referenceLineHeight * (spacing.Percent.Value / 100.0);
+
+        return 0;
+    }
+
+    private static double ResolveLineSpacingAdjustment(Spacing? spacing, double referenceLineHeight)
+    {
+        if (spacing == null)
+            return 0;
+
+        if (spacing.Points.HasValue)
+            return Math.Max(0, spacing.Points.Value - referenceLineHeight);
+
+        if (spacing.Percent.HasValue)
+            return Math.Max(0, referenceLineHeight * (spacing.Percent.Value / 100.0 - 1));
+
+        return 0;
+    }
+
+    private static double GetParagraphFirstLineX(double baseX, Paragraph paragraph)
+    {
+        var indent = paragraph.Indent / 914400.0 * 72;
+        return GetParagraphContinuationX(baseX, paragraph) + Math.Max(0, indent);
+    }
+
+    private static double GetParagraphContinuationX(double baseX, Paragraph paragraph)
+    {
+        var leftMargin = paragraph.MarginLeft / 914400.0 * 72;
+        return baseX + leftMargin;
+    }
+
+    private static double GetParagraphFirstLineWidth(Paragraph paragraph, double totalWidth)
+    {
+        var indent = paragraph.Indent / 914400.0 * 72;
+        return Math.Max(1, GetParagraphContinuationWidth(paragraph, totalWidth) - Math.Max(0, indent));
+    }
+
+    private static double GetParagraphContinuationWidth(Paragraph paragraph, double totalWidth)
+    {
+        var leftMargin = paragraph.MarginLeft / 914400.0 * 72;
+        var rightMargin = paragraph.MarginRight / 914400.0 * 72;
+        return Math.Max(1, totalWidth - leftMargin - rightMargin);
+    }
+
+    private static double GetParagraphStartX(double baseX, Paragraph paragraph)
+    {
+        return GetParagraphFirstLineX(baseX, paragraph);
+    }
+
+    private static double GetParagraphAvailableWidth(Paragraph paragraph, double totalWidth)
+    {
+        return GetParagraphContinuationWidth(paragraph, totalWidth);
+    }
+
+    private static double GetParagraphBulletX(double baseX, Paragraph paragraph)
+    {
+        var marginLeft = paragraph.MarginLeft / 914400.0 * 72;
+        var indent = paragraph.Indent / 914400.0 * 72;
+        return baseX + marginLeft + Math.Min(0, indent);
+    }
+
+    private static double GetParagraphLineHeight(Paragraph paragraph, int defaultFontSize, TextProperties? textProperties = null)
+    {
+        var fontSize = paragraph.Runs
+            .Where(run => !string.IsNullOrEmpty(run.Text))
+            .Select(run => run.Properties?.FontSize ?? defaultFontSize)
+            .DefaultIfEmpty(defaultFontSize)
+            .Max();
+
+        return ResolveLineHeight(ResolveEffectiveFontSize(fontSize, textProperties), textProperties);
+    }
+
+    private double ResolveAlignedTextX(double startX, double width, string text, double fontSize, TextAlignment alignment)
+    {
+        var textWidth = EstimateTextWidth(text, fontSize);
+        return alignment switch
+        {
+            TextAlignment.Center => startX + Math.Max(0, (width - textWidth) / 2),
+            TextAlignment.Right => startX + Math.Max(0, width - textWidth),
+            _ => startX
+        };
+    }
+
+    private void RenderTextFragment(StringBuilder sb, PdfPage page, string text, string fontName, int fontSize, Color color, double x, double y)
+    {
+        bool isChinese = ContainsChineseCharacters(text);
+        PdfFont font = isChinese
+            ? GetOrCreateFont("MicrosoftYaHei", page, true)
+            : GetOrCreateFont(fontName, page);
+
+        sb.AppendLine("q");
+        SetTextColor(sb, page, color);
+        sb.AppendLine("BT");
+        sb.AppendLine($"/F{font.Number} {fontSize} Tf");
+        sb.AppendLine($"1 0 0 1 {x:F2} {y:F2} Tm");
+        sb.AppendLine($"({EscapeText(text, isChinese)}) Tj");
+        sb.AppendLine("ET");
+        sb.AppendLine("Q");
+    }
+
+    private void RenderSimpleText(StringBuilder sb, string text, string fontName, int fontSize, Color color, double x, double y)
+    {
+        var page = _currentPage ?? throw new InvalidOperationException("Text rendering requires an active page context.");
+        RenderTextFragment(sb, page, text, fontName, fontSize, color, x, y);
+    }
+
+    private static double ResolveBulletScale(Paragraph paragraph)
+    {
+        return paragraph.BulletSize > 0 ? paragraph.BulletSize : 1;
+    }
+
+    private static string? ResolveBulletMarker(Paragraph paragraph, IDictionary<int, int> autoNumberState)
+    {
+        if (paragraph.BulletType != BulletType.AutoNumber)
+        {
+            ResetAutoNumberState(autoNumberState, paragraph.Level);
+            return paragraph.BulletType switch
+            {
+                BulletType.Char when !string.IsNullOrEmpty(paragraph.BulletChar) => paragraph.BulletChar,
+                BulletType.Blip => "*",
+                _ => null
+            };
+        }
+
+        ResetDeeperAutoNumberState(autoNumberState, paragraph.Level);
+        if (!autoNumberState.TryGetValue(paragraph.Level, out var current))
+        {
+            current = Math.Max(1, paragraph.BulletStartAt);
+        }
+
+        autoNumberState[paragraph.Level] = current + 1;
+        return FormatAutoNumber(current, paragraph.BulletAutoNumberType);
+    }
+
+    private static void ResetAutoNumberState(IDictionary<int, int> autoNumberState, int level)
+    {
+        foreach (var key in autoNumberState.Keys.Where(key => key >= level).ToList())
+        {
+            autoNumberState.Remove(key);
+        }
+    }
+
+    private static void ResetDeeperAutoNumberState(IDictionary<int, int> autoNumberState, int level)
+    {
+        foreach (var key in autoNumberState.Keys.Where(key => key > level).ToList())
+        {
+            autoNumberState.Remove(key);
+        }
+    }
+
+    private static string FormatAutoNumber(int value, string? type)
+    {
+        return type switch
+        {
+            "alphaLcParenBoth" => $"({ToAlphabetic(value, false)})",
+            "alphaLcParenR" => $"{ToAlphabetic(value, false)})",
+            "alphaLcPeriod" => $"{ToAlphabetic(value, false)}.",
+            "alphaUcParenBoth" => $"({ToAlphabetic(value, true)})",
+            "alphaUcParenR" => $"{ToAlphabetic(value, true)})",
+            "alphaUcPeriod" => $"{ToAlphabetic(value, true)}.",
+            "romanLcParenBoth" => $"({ToRoman(value, false)})",
+            "romanLcParenR" => $"{ToRoman(value, false)})",
+            "romanLcPeriod" => $"{ToRoman(value, false)}.",
+            "romanUcParenBoth" => $"({ToRoman(value, true)})",
+            "romanUcParenR" => $"{ToRoman(value, true)})",
+            "romanUcPeriod" => $"{ToRoman(value, true)}.",
+            "arabicParenBoth" => $"({value.ToString(CultureInfo.InvariantCulture)})",
+            "arabicParenR" => $"{value.ToString(CultureInfo.InvariantCulture)})",
+            "arabicPlain" => value.ToString(CultureInfo.InvariantCulture),
+            _ => $"{value.ToString(CultureInfo.InvariantCulture)}."
+        };
+    }
+
+    private static string ToAlphabetic(int value, bool upperCase)
+    {
+        if (value <= 0)
+            return upperCase ? "A" : "a";
+
+        var builder = new StringBuilder();
+        var current = value;
+        while (current > 0)
+        {
+            current--;
+            var offset = current % 26;
+            builder.Insert(0, (char)((upperCase ? 'A' : 'a') + offset));
+            current /= 26;
+        }
+
+        return builder.ToString();
+    }
+
+    private static string ToRoman(int value, bool upperCase)
+    {
+        if (value <= 0)
+            return upperCase ? "I" : "i";
+
+        var numerals = new (int Value, string Symbol)[]
+        {
+            (1000, "M"),
+            (900, "CM"),
+            (500, "D"),
+            (400, "CD"),
+            (100, "C"),
+            (90, "XC"),
+            (50, "L"),
+            (40, "XL"),
+            (10, "X"),
+            (9, "IX"),
+            (5, "V"),
+            (4, "IV"),
+            (1, "I")
+        };
+
+        var builder = new StringBuilder();
+        var current = value;
+        foreach (var (numeralValue, symbol) in numerals)
+        {
+            while (current >= numeralValue)
+            {
+                builder.Append(symbol);
+                current -= numeralValue;
+            }
+        }
+
+        return upperCase ? builder.ToString() : builder.ToString().ToLowerInvariant();
+    }
+
+    private double EstimateTextWidth(string text, double fontSize)
+    {
+        double widthUnits = 0;
+
+        foreach (var character in text)
+        {
+            widthUnits += character switch
+            {
+                ' ' => 0.28,
+                '\t' => 1.12,
+                _ when IsWideCharacter(character) => 1.0,
+                _ when "ilIjtf".IndexOf(character) >= 0 => 0.32,
+                _ when "mwMW".IndexOf(character) >= 0 => char.IsUpper(character) ? 0.78 : 0.72,
+                _ when char.IsUpper(character) => 0.58,
+                _ when char.IsDigit(character) => 0.52,
+                _ when ".,'`!:;|".IndexOf(character) >= 0 => 0.24,
+                _ when "()[]{}".IndexOf(character) >= 0 => 0.30,
+                _ when char.IsPunctuation(character) => 0.32,
+                _ => 0.50
+            };
+        }
+
+        return widthUnits * fontSize;
+    }
+
+    private bool CanFitWrappedText(string text, double fontSize, double availableWidth)
+    {
+        const double wrappingTolerance = 1.03;
+        return EstimateTextWidth(text, fontSize) <= availableWidth * wrappingTolerance;
+    }
+
+    private static bool IsWideCharacter(char character)
+    {
+        return character >= 0x2E80 ||
+               (character >= 0x1100 && character <= 0x11FF) ||
+               (character >= 0x3040 && character <= 0x30FF) ||
+               (character >= 0xAC00 && character <= 0xD7AF);
+    }
+
+    private bool TryPreparePdfImage(byte[] imageData, out PreparedImageData? preparedImage)
+    {
+        preparedImage = null;
+
+        try
+        {
+            preparedImage = ImageConverter.PrepareForPdf(imageData);
+            return true;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error preparing image for PDF: {ex.Message}");
+            return false;
+        }
+    }
+
+    private void RenderPicture(StringBuilder sb, Picture picture, Slide slide, double pageHeight, PptxDocument pptx, PdfPage page)
     {
         if (string.IsNullOrEmpty(picture.ImageRelationshipId)) return;
 
-        var imagePath = pptx.GetImagePathFromRId(picture.ImageRelationshipId);
+        var imagePath = pptx.GetImagePathFromRId(picture.SourcePath ?? slide.SourcePath, picture.ImageRelationshipId);
         if (imagePath == null) return;
 
         var imageData = pptx.GetImageData(imagePath);
@@ -859,28 +1321,10 @@ public class PdfRenderer
 
         try
         {
-            var imageInfo = ImageDecoder.Decode(imageData);
+            if (!TryPreparePdfImage(imageData, out var preparedImage) || preparedImage == null)
+                return;
 
-            // For PDF, we need JPEG format
-            // If it's already JPEG, use directly; otherwise we would need conversion
-            bool isJpeg = imageInfo.Format == ImageFormat.Jpeg;
-
-            if (!isJpeg)
-            {
-                // Convert non-JPEG formats to JPEG
-                try
-                {
-                    imageData = ImageConverter.EnsureJpegFormat(imageData);
-                    isJpeg = true;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error converting image: {ex.Message}");
-                    return;
-                }
-            }
-
-            var pdfImage = _document.AddImage(imageData, imageInfo.Width, imageInfo.Height, true);
+            var pdfImage = _document.AddImage(preparedImage);
             page.Images.Add(pdfImage);
 
             var x = picture.Bounds.XPoints;
@@ -916,23 +1360,23 @@ public class PdfRenderer
         }
     }
 
-    private void RenderGroupShape(StringBuilder sb, GroupShape group, double pageHeight, PptxDocument pptx, PdfPage page)
+    private void RenderGroupShape(StringBuilder sb, GroupShape group, Slide slide, double pageHeight, PptxDocument pptx, PdfPage page)
     {
         // Render grouped shapes
         foreach (var shape in group.Shapes)
         {
-            RenderShape(sb, shape, pageHeight, page);
+            RenderShape(sb, shape, pageHeight, slide, pptx, page);
         }
 
         foreach (var picture in group.Pictures)
         {
-            RenderPicture(sb, picture, pageHeight, pptx, page);
+            RenderPicture(sb, picture, slide, pageHeight, pptx, page);
         }
 
         // Recursively render nested groups
         foreach (var childGroup in group.ChildGroups)
         {
-            RenderGroupShape(sb, childGroup, pageHeight, pptx, page);
+            RenderGroupShape(sb, childGroup, slide, pageHeight, pptx, page);
         }
 
         foreach (var table in group.Tables)
@@ -986,8 +1430,10 @@ public class PdfRenderer
                 // Render cell background
                 if (cell.Properties?.Fill != null)
                 {
-                    SetColor(sb, cell.Properties.Fill.Color);
+                    sb.AppendLine("q");
+                    SetColor(sb, page, cell.Properties.Fill.Color);
                     sb.AppendLine($"{currentX:F2} {currentY:F2} {cellWidth:F2} {cellHeight:F2} re f");
+                    sb.AppendLine("Q");
                 }
                 // Apply table banding styles if no explicit fill
                 else if (table.Properties != null)
@@ -995,33 +1441,41 @@ public class PdfRenderer
                     if (table.Properties.BandRows && rowIdx % 2 == 1)
                     {
                         // Light gray for banded rows
-                        sb.AppendLine("0.9 0.9 0.9 rg");
+                        sb.AppendLine("q");
+                        SetColor(sb, page, new Color(230, 230, 230));
                         sb.AppendLine($"{currentX:F2} {currentY:F2} {cellWidth:F2} {cellHeight:F2} re f");
+                        sb.AppendLine("Q");
                     }
                     else if (table.Properties.BandColumns && colIdx % 2 == 1)
                     {
                         // Light gray for banded columns
-                        sb.AppendLine("0.95 0.95 0.95 rg");
+                        sb.AppendLine("q");
+                        SetColor(sb, page, new Color(242, 242, 242));
                         sb.AppendLine($"{currentX:F2} {currentY:F2} {cellWidth:F2} {cellHeight:F2} re f");
+                        sb.AppendLine("Q");
                     }
                     else if (table.Properties.HasHeaderRow && rowIdx == 0)
                     {
                         // Header row style
-                        sb.AppendLine("0.8 0.8 1 rg");
+                        sb.AppendLine("q");
+                        SetColor(sb, page, new Color(204, 204, 255));
                         sb.AppendLine($"{currentX:F2} {currentY:F2} {cellWidth:F2} {cellHeight:F2} re f");
+                        sb.AppendLine("Q");
                     }
                     else if (table.Properties.HasHeaderColumn && colIdx == 0)
                     {
                         // Header column style
-                        sb.AppendLine("0.8 0.8 1 rg");
+                        sb.AppendLine("q");
+                        SetColor(sb, page, new Color(204, 204, 255));
                         sb.AppendLine($"{currentX:F2} {currentY:F2} {cellWidth:F2} {cellHeight:F2} re f");
+                        sb.AppendLine("Q");
                     }
                 }
 
                 // Render cell borders
                 if (cell.Properties?.Borders != null)
                 {
-                    RenderCellBorders(sb, cell.Properties.Borders, currentX, currentY, cellWidth, cellHeight);
+                    RenderCellBorders(sb, cell.Properties.Borders, currentX, currentY, cellWidth, cellHeight, page);
                 }
 
                 // Render cell text
@@ -1037,38 +1491,39 @@ public class PdfRenderer
         }
     }
 
-    private void RenderCellBorders(StringBuilder sb, CellBorders borders, double x, double y, double w, double h)
+    private void RenderCellBorders(StringBuilder sb, CellBorders borders, double x, double y, double w, double h, PdfPage page)
     {
         // Top border
         if (borders.Top != null)
         {
-            RenderBorder(sb, borders.Top, x, y + h, x + w, y + h);
+            RenderBorder(sb, borders.Top, x, y + h, x + w, y + h, page);
         }
 
         // Bottom border
         if (borders.Bottom != null)
         {
-            RenderBorder(sb, borders.Bottom, x, y, x + w, y);
+            RenderBorder(sb, borders.Bottom, x, y, x + w, y, page);
         }
 
         // Left border
         if (borders.Left != null)
         {
-            RenderBorder(sb, borders.Left, x, y, x, y + h);
+            RenderBorder(sb, borders.Left, x, y, x, y + h, page);
         }
 
         // Right border
         if (borders.Right != null)
         {
-            RenderBorder(sb, borders.Right, x + w, y, x + w, y + h);
+            RenderBorder(sb, borders.Right, x + w, y, x + w, y + h, page);
         }
     }
 
-    private void RenderBorder(StringBuilder sb, CellBorder border, double x1, double y1, double x2, double y2)
+    private void RenderBorder(StringBuilder sb, CellBorder border, double x1, double y1, double x2, double y2, PdfPage page)
     {
+        sb.AppendLine("q");
         if (border.Color.HasValue)
         {
-            SetStrokeColor(sb, border.Color.Value);
+            SetStrokeColor(sb, page, border.Color.Value);
         }
         sb.AppendLine($"{border.Width / 12700.0 * 72:F2} w");
 
@@ -1085,6 +1540,7 @@ public class PdfRenderer
         {
             sb.AppendLine("[] 0 d");
         }
+        sb.AppendLine("Q");
     }
 
     private void RenderCellText(StringBuilder sb, TableCell cell, double x, double y, double w, double h, PdfPage page)
@@ -1107,82 +1563,75 @@ public class PdfRenderer
 
         var availableWidth = w - leftMargin - rightMargin;
         var availableHeight = h - topMargin - bottomMargin;
-
-        var currentY = y + h - topMargin;
+        var textTop = y + h - topMargin;
+        var allowWrap = cell.Properties?.NoWrap != true;
+        var defaultFontSize = cell.Paragraphs
+            .SelectMany(paragraph => paragraph.Runs)
+            .Select(run => run.Properties?.FontSize ?? 12)
+            .DefaultIfEmpty(12)
+            .Max();
+        var contentHeight = EstimateTextContentHeight(cell.Paragraphs, availableWidth, defaultFontSize, allowWrap: allowWrap);
+        var currentY = ResolveTextStartY(textTop, availableHeight, contentHeight, cell.Properties?.Anchor ?? TextAnchor.Top);
+        var autoNumberState = new Dictionary<int, int>();
 
         foreach (var paragraph in cell.Paragraphs)
         {
-            var text = paragraph.GetFullText();
-            if (string.IsNullOrEmpty(text)) continue;
+            var paragraphLineHeight = GetParagraphLineHeight(paragraph, defaultFontSize);
+            currentY -= ResolveParagraphSpacing(paragraph.SpaceBefore, paragraphLineHeight);
 
-            // Check if text contains Chinese characters
-            bool isChinese = ContainsChineseCharacters(text);
+            double firstLineX = GetParagraphFirstLineX(x + leftMargin, paragraph);
+            double continuationX = GetParagraphContinuationX(x + leftMargin, paragraph);
+            double firstLineWidth = GetParagraphFirstLineWidth(paragraph, availableWidth);
+            double continuationWidth = GetParagraphContinuationWidth(paragraph, availableWidth);
+            double bulletX = GetParagraphBulletX(x + leftMargin, paragraph);
+            var paragraphAlignment = paragraph.Alignment ?? TextAlignment.Left;
+            var bulletMarker = ResolveBulletMarker(paragraph, autoNumberState);
+            var paragraphLineIndex = 0;
 
-            // Get font and style from the first run
-            var firstRun = paragraph.Runs.FirstOrDefault();
-            var fontFamily = firstRun?.Properties?.FontFamily ?? "Arial";
-            var fontSize = firstRun?.Properties?.FontSize ?? 12;
-            var color = firstRun?.Properties?.Color ?? Color.Black;
-
-            // Calculate line height
-            var lineHeight = fontSize * 1.2;
-
-            // Get or create font
-            PdfFont font;
-            if (isChinese)
+            foreach (var run in paragraph.Runs)
             {
-                font = GetOrCreateFont("MicrosoftYaHei", page, true);
-            }
-            else
-            {
-                font = GetOrCreateFont(fontFamily, page);
-            }
+                if (string.IsNullOrEmpty(run.Text)) continue;
 
-            SetTextColor(sb, color);
-            sb.AppendLine("BT");
-            sb.AppendLine($"/F{font.Number} {fontSize} Tf");
+                var runFontName = run.Properties?.FontFamily ?? "Arial";
+                var runFontSize = ResolveEffectiveFontSize(run.Properties?.FontSize ?? defaultFontSize, null);
+                var runFontColor = run.Properties?.Color ?? Color.Black;
+                var lineHeight = ResolveLineHeight(runFontSize, null);
 
-            // Handle text wrapping
-            var wrappedText = WrapText(text, availableWidth, fontSize);
-
-            foreach (var line in wrappedText)
-            {
-                // Calculate text position based on alignment and cell anchor
-                var textX = x + leftMargin;
-                var textY = currentY;
-
-                // Apply cell anchor
-                if (cell.Properties != null)
+                double baselineOffset = 0;
+                var baselineOffsetValue = run.Properties?.BaselineOffset;
+                if (baselineOffsetValue is double offsetValue && offsetValue != 0)
                 {
-                    switch (cell.Properties.Anchor)
+                    baselineOffset = offsetValue * runFontSize;
+                }
+
+                var wrappedText = WrapText(
+                    run.Text,
+                    paragraphLineIndex == 0 ? firstLineWidth : continuationWidth,
+                    continuationWidth,
+                    runFontSize,
+                    allowWrap);
+                foreach (var line in wrappedText)
+                {
+                    currentY -= lineHeight;
+
+                    if (paragraphLineIndex == 0 && !string.IsNullOrEmpty(bulletMarker))
                     {
-                        case TextAnchor.Bottom:
-                            textY = y + bottomMargin + (availableHeight - lineHeight * wrappedText.Count);
-                            break;
-                        case TextAnchor.Middle:
-                            textY = y + h * 0.5 - lineHeight * wrappedText.Count * 0.5;
-                            break;
+                        var bulletFontSize = Math.Max(1, (int)Math.Round(runFontSize * ResolveBulletScale(paragraph)));
+                        var bulletColor = paragraph.BulletColor ?? runFontColor;
+                        var bulletFontName = paragraph.BulletFont ?? runFontName;
+                        RenderTextFragment(sb, page, bulletMarker, bulletFontName, bulletFontSize, bulletColor, bulletX, currentY + baselineOffset);
                     }
-                }
 
-                // Apply paragraph alignment
-                if (paragraph.Alignment == TextAlignment.Center)
-                {
-                    // Approximate center alignment
-                    textX = x + w * 0.5 - line.Length * fontSize * 0.25;
+                    var lineStartX = paragraphLineIndex == 0 ? firstLineX : continuationX;
+                    var lineWidth = paragraphLineIndex == 0 ? firstLineWidth : continuationWidth;
+                    var lineX = ResolveAlignedTextX(lineStartX, lineWidth, line, runFontSize, paragraphAlignment);
+                    RenderTextFragment(sb, page, line, runFontName, runFontSize, runFontColor, lineX, currentY + baselineOffset);
+                    paragraphLineIndex++;
                 }
-                else if (paragraph.Alignment == TextAlignment.Right)
-                {
-                    // Approximate right alignment
-                    textX = x + w - rightMargin - line.Length * fontSize * 0.5;
-                }
-
-                sb.AppendLine($"{textX:F2} {textY:F2} Td");
-                sb.AppendLine($"({EscapeText(line, isChinese)}) Tj");
-                sb.AppendLine("ET");
-
-                currentY -= lineHeight;
             }
+
+            currentY -= ResolveParagraphSpacing(paragraph.SpaceAfter, paragraphLineHeight);
+            currentY -= ResolveLineSpacingAdjustment(paragraph.LineSpacing, paragraphLineHeight);
         }
     }
 
@@ -1265,19 +1714,38 @@ public class PdfRenderer
         return false;
     }
 
-    private static void SetColor(StringBuilder sb, Color color)
+    private void SetColor(StringBuilder sb, PdfPage page, Color color)
     {
+        ApplyExtGState(sb, page, color.A / 255.0, 1);
         sb.AppendLine($"{color.R / 255.0:F3} {color.G / 255.0:F3} {color.B / 255.0:F3} rg");
     }
 
-    private static void SetStrokeColor(StringBuilder sb, Color color)
+    private void SetStrokeColor(StringBuilder sb, PdfPage page, Color color)
     {
+        ApplyExtGState(sb, page, 1, color.A / 255.0);
         sb.AppendLine($"{color.R / 255.0:F3} {color.G / 255.0:F3} {color.B / 255.0:F3} RG");
     }
 
-    private static void SetTextColor(StringBuilder sb, Color color)
+    private void SetTextColor(StringBuilder sb, PdfPage page, Color color)
     {
+        ApplyExtGState(sb, page, color.A / 255.0, 1);
         sb.AppendLine($"{color.R / 255.0:F3} {color.G / 255.0:F3} {color.B / 255.0:F3} rg");
+    }
+
+    private void ApplyExtGState(StringBuilder sb, PdfPage page, double fillAlpha, double strokeAlpha)
+    {
+        fillAlpha = Math.Clamp(fillAlpha, 0, 1);
+        strokeAlpha = Math.Clamp(strokeAlpha, 0, 1);
+
+        var gsName = $"GS_{(int)Math.Round(fillAlpha * 1000):D4}_{(int)Math.Round(strokeAlpha * 1000):D4}";
+        if (!page.ExtGStates.TryGetValue(gsName, out var gsObject))
+        {
+            gsObject = new PdfExtGState(_document.GetNextObjectNumber(), fillAlpha, strokeAlpha);
+            _document.AddObject(gsObject);
+            page.ExtGStates[gsName] = gsObject;
+        }
+
+        sb.AppendLine($"/{gsName} gs");
     }
 
     private static string EscapeText(string text, bool isChinese = false)
@@ -1312,7 +1780,7 @@ public class PdfRenderer
             .Replace("\t", "\\t");
     }
 
-    private void RenderGradientFill(StringBuilder sb, Fill fill, double x, double y, double w, double h, ShapeType shapeType)
+    private void RenderGradientFill(StringBuilder sb, Fill fill, double x, double y, double w, double h, ShapeType shapeType, PdfPage page)
     {
         if (fill.GradientStops == null || fill.GradientStops.Count < 2) return;
 
@@ -1331,7 +1799,7 @@ public class PdfRenderer
             var t = i / (double)stripeCount;
             var color = InterpolateGradientColor(stops, t);
 
-            SetColor(sb, color);
+            SetColor(sb, page, color);
 
             // Calculate stripe position based on gradient type
             double sx, sy, sw, sh;
@@ -1365,49 +1833,41 @@ public class PdfRenderer
         sb.AppendLine("Q");
     }
 
-    private void RenderPictureFill(StringBuilder sb, Fill fill, double x, double y, double w, double h, ShapeType shapeType)
+    private void RenderPictureFill(StringBuilder sb, Fill fill, double x, double y, double w, double h, ShapeType shapeType, string sourcePartPath, PptxDocument pptx, PdfPage page)
     {
-        if (fill.PictureFill == null || fill.PictureFill.Blip == null || fill.PictureFill.Blip.Data == null)
+        if (string.IsNullOrEmpty(fill.PictureRelationshipId))
             return;
 
         try
         {
-            // Get image data
-            var imageData = fill.PictureFill.Blip.Data;
-            var base64Image = Convert.ToBase64String(imageData);
+            var imagePath = pptx.GetImagePathFromRId(sourcePartPath, fill.PictureRelationshipId);
+            if (imagePath == null)
+                return;
 
-            // Create image object in PDF
-            var imageId = _imageCounter++;
-            sb.AppendLine($"{imageId} 0 obj");
-            sb.AppendLine($"<< /Type /XObject /Subtype /Image /Width 100 /Height 100 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode >>");
-            sb.AppendLine($"stream");
-            sb.AppendLine(base64Image);
-            sb.AppendLine("endstream");
-            sb.AppendLine(">>");
-            sb.AppendLine("endobj");
+            var imageData = pptx.GetImageData(imagePath);
+            if (imageData == null || !TryPreparePdfImage(imageData, out var preparedImage) || preparedImage == null)
+                return;
 
-            // Use the image as fill
+            var pdfImage = _document.AddImage(preparedImage);
+            page.Images.Add(pdfImage);
+
             sb.AppendLine("q");
 
-            // Create clipping path for the shape
             RenderShapePathForClipping(sb, shapeType, x, y, w, h);
             sb.AppendLine("W n");
 
-            // Draw the image
-            sb.AppendLine($"1 0 0 1 {x:F2} {y:F2} cm");
-            sb.AppendLine($"/{imageId} Do");
+            sb.AppendLine($"{w:F2} 0 0 {h:F2} {x:F2} {y:F2} cm");
+            sb.AppendLine($"/Im{pdfImage.Number} Do");
 
             sb.AppendLine("Q");
         }
         catch (Exception ex)
         {
-            // Fallback to solid fill if image processing fails
-            SetColor(sb, fill.Color);
-            RenderShapePath(sb, shapeType, x, y, w, h, true);
+            Console.WriteLine($"Error rendering picture fill: {ex.Message}");
         }
     }
 
-    private void RenderChart(StringBuilder sb, Chart chart, double pageHeight)
+    private void RenderChart(StringBuilder sb, Chart chart, double pageHeight, PdfPage page)
     {
         if (chart == null) return;
 
@@ -1428,12 +1888,7 @@ public class PdfRenderer
         // Draw chart title if exists
         if (!string.IsNullOrEmpty(chart.Title))
         {
-            sb.AppendLine("BT");
-            sb.AppendLine("/F1 12 Tf");
-            sb.AppendLine("0 0 0 rg");
-            sb.AppendLine($"{x + w/2:F2} {y + h - 20:F2} Td");
-            sb.AppendLine($"({chart.Title}) Tj");
-            sb.AppendLine("ET");
+            RenderSimpleText(sb, chart.Title, "Helvetica", 12, Color.Black, x + w / 2, y + h - 20);
         }
 
         // Calculate plot area
@@ -1453,36 +1908,80 @@ public class PdfRenderer
         switch (chart.Type)
         {
             case ChartType.Bar:
-                RenderBarChart(sb, chart, plotX, plotY, plotW, plotH);
+                RenderBarChart(sb, chart, plotX, plotY, plotW, plotH, page);
                 break;
             case ChartType.Column:
-                RenderColumnChart(sb, chart, plotX, plotY, plotW, plotH);
+                RenderColumnChart(sb, chart, plotX, plotY, plotW, plotH, page);
                 break;
             case ChartType.Line:
-                RenderLineChart(sb, chart, plotX, plotY, plotW, plotH);
+                RenderLineChart(sb, chart, plotX, plotY, plotW, plotH, page);
                 break;
             case ChartType.Pie:
-                RenderPieChart(sb, chart, plotX, plotY, plotW, plotH);
+                RenderPieChart(sb, chart, plotX, plotY, plotW, plotH, page);
                 break;
             default:
                 // Draw placeholder for unsupported chart types
-                sb.AppendLine("BT");
-                sb.AppendLine("/F1 10 Tf");
-                sb.AppendLine("0.5 0.5 0.5 rg");
-                sb.AppendLine($"{plotX + plotW/2:F2} {plotY + plotH/2:F2} Td");
-                sb.AppendLine($"({chart.Type} Chart) Tj");
-                sb.AppendLine("ET");
+                RenderSimpleText(sb, $"{chart.Type} Chart", "Helvetica", 10, new Color(128, 128, 128), plotX + plotW / 2, plotY + plotH / 2);
                 break;
         }
 
         // Draw legend if exists
         if (chart.Legend != null)
         {
-            RenderChartLegend(sb, chart, x, y, w, h);
+            RenderChartLegend(sb, chart, x, y, w, h, page);
         }
     }
 
-    private void RenderBarChart(StringBuilder sb, Chart chart, double x, double y, double w, double h)
+    private void RenderBarChart(StringBuilder sb, Chart chart, double x, double y, double w, double h, PdfPage page)
+    {
+        if (chart.Series.Count == 0) return;
+
+        var series = chart.Series[0];
+        var dataPoints = series.DataPoints;
+        if (dataPoints.Count == 0) return;
+
+        var maxValue = dataPoints.Max(dp => dp.Value);
+        if (maxValue <= 0) return;
+
+        var labelWidth = Math.Min(50.0, w * 0.2);
+        var valueWidth = 24.0;
+        var barAreaX = x + labelWidth + 6;
+        var barAreaWidth = Math.Max(10, w - labelWidth - valueWidth - 10);
+        var slotHeight = h / dataPoints.Count;
+        var barHeight = Math.Max(8, slotHeight * 0.6);
+        var fillColor = GetChartSeriesFillColor(series, 0);
+        var strokeColor = GetChartSeriesStrokeColor(series, 0);
+
+        for (int i = 0; i < dataPoints.Count; i++)
+        {
+            var dataPoint = dataPoints[i];
+            var barWidth = (dataPoint.Value / maxValue) * barAreaWidth;
+            var barY = y + h - ((i + 1) * slotHeight) + (slotHeight - barHeight) / 2;
+
+            // Set bar color
+            sb.AppendLine("q");
+            SetColor(sb, page, fillColor);
+            sb.AppendLine($"{barAreaX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re f");
+            sb.AppendLine("Q");
+
+            // Draw bar border
+            sb.AppendLine("q");
+            SetStrokeColor(sb, page, strokeColor);
+            sb.AppendLine("1 w");
+            sb.AppendLine($"{barAreaX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re S");
+            sb.AppendLine("Q");
+
+            // Draw data label
+            if (!string.IsNullOrEmpty(dataPoint.Category))
+            {
+                RenderSimpleText(sb, dataPoint.Category, "Helvetica", 8, Color.Black, x + 2, barY + barHeight / 2 - 2);
+            }
+
+            RenderSimpleText(sb, $"{dataPoint.Value:0.##}", "Helvetica", 8, Color.Black, barAreaX + barWidth + 4, barY + barHeight / 2 - 2);
+        }
+    }
+
+    private void RenderColumnChart(StringBuilder sb, Chart chart, double x, double y, double w, double h, PdfPage page)
     {
         if (chart.Series.Count == 0) return;
 
@@ -1492,6 +1991,9 @@ public class PdfRenderer
 
         var barWidth = w / (dataPoints.Count * 1.5);
         var maxValue = dataPoints.Max(dp => dp.Value);
+        if (maxValue <= 0) return;
+        var fillColor = GetChartSeriesFillColor(series, 0);
+        var strokeColor = GetChartSeriesStrokeColor(series, 0);
 
         for (int i = 0; i < dataPoints.Count; i++)
         {
@@ -1501,68 +2003,26 @@ public class PdfRenderer
             var barY = y + h - barHeight;
 
             // Set bar color
-            sb.AppendLine("0.4 0.6 0.8 rg");
+            sb.AppendLine("q");
+            SetColor(sb, page, fillColor);
             sb.AppendLine($"{barX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re f");
+            sb.AppendLine("Q");
 
             // Draw bar border
-            sb.AppendLine("0.2 0.4 0.6 RG");
+            sb.AppendLine("q");
+            SetStrokeColor(sb, page, strokeColor);
             sb.AppendLine("1 w");
             sb.AppendLine($"{barX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re S");
+            sb.AppendLine("Q");
 
-            // Draw data label
             if (!string.IsNullOrEmpty(dataPoint.Category))
             {
-                sb.AppendLine("BT");
-                sb.AppendLine("/F1 8 Tf");
-                sb.AppendLine("0 0 0 rg");
-                sb.AppendLine($"{barX + barWidth/2:F2} {y - 10:F2} Td");
-                sb.AppendLine($"({dataPoint.Category}) Tj");
-                sb.AppendLine("ET");
+                RenderSimpleText(sb, dataPoint.Category, "Helvetica", 8, Color.Black, barX + barWidth / 2, y - 10);
             }
         }
     }
 
-    private void RenderColumnChart(StringBuilder sb, Chart chart, double x, double y, double w, double h)
-    {
-        if (chart.Series.Count == 0) return;
-
-        var series = chart.Series[0];
-        var dataPoints = series.DataPoints;
-        if (dataPoints.Count == 0) return;
-
-        var barWidth = w / (dataPoints.Count * 1.5);
-        var maxValue = dataPoints.Max(dp => dp.Value);
-
-        for (int i = 0; i < dataPoints.Count; i++)
-        {
-            var dataPoint = dataPoints[i];
-            var barHeight = (dataPoint.Value / maxValue) * h;
-            var barX = x + i * barWidth * 1.5 + barWidth * 0.25;
-            var barY = y + h - barHeight;
-
-            // Set bar color
-            sb.AppendLine("0.6 0.4 0.8 rg");
-            sb.AppendLine($"{barX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re f");
-
-            // Draw bar border
-            sb.AppendLine("0.4 0.2 0.6 RG");
-            sb.AppendLine("1 w");
-            sb.AppendLine($"{barX:F2} {barY:F2} {barWidth:F2} {barHeight:F2} re S");
-
-            // Draw data label
-            if (!string.IsNullOrEmpty(dataPoint.Category))
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine("/F1 8 Tf");
-                sb.AppendLine("0 0 0 rg");
-                sb.AppendLine($"{barX + barWidth/2:F2} {y - 10:F2} Td");
-                sb.AppendLine($"({dataPoint.Category}) Tj");
-                sb.AppendLine("ET");
-            }
-        }
-    }
-
-    private void RenderLineChart(StringBuilder sb, Chart chart, double x, double y, double w, double h)
+    private void RenderLineChart(StringBuilder sb, Chart chart, double x, double y, double w, double h, PdfPage page)
     {
         if (chart.Series.Count == 0) return;
 
@@ -1571,9 +2031,13 @@ public class PdfRenderer
         if (dataPoints.Count < 2) return;
 
         var maxValue = dataPoints.Max(dp => dp.Value);
+        if (maxValue <= 0) return;
+        var strokeColor = GetChartSeriesStrokeColor(series, 0);
+        var fillColor = GetChartSeriesFillColor(series, 0);
 
         // Draw line
-        sb.AppendLine("0.8 0.4 0.2 RG");
+        sb.AppendLine("q");
+        SetStrokeColor(sb, page, strokeColor);
         sb.AppendLine("2 w");
 
         for (int i = 0; i < dataPoints.Count; i++)
@@ -1589,18 +2053,27 @@ public class PdfRenderer
         }
 
         sb.AppendLine("S");
+        sb.AppendLine("Q");
 
         // Draw data points
-        sb.AppendLine("0.8 0.4 0.2 rg");
-        foreach (var dataPoint in dataPoints)
+        for (int i = 0; i < dataPoints.Count; i++)
         {
-            var pointX = x + (dataPoints.IndexOf(dataPoint) / (double)(dataPoints.Count - 1)) * w;
+            var dataPoint = dataPoints[i];
+            var pointX = x + (i / (double)(dataPoints.Count - 1)) * w;
             var pointY = y + h - (dataPoint.Value / maxValue) * h;
+            sb.AppendLine("q");
+            SetColor(sb, page, fillColor);
             sb.AppendLine($"{pointX - 3:F2} {pointY - 3:F2} 6 0 360 re f");
+            sb.AppendLine("Q");
+
+            if (!string.IsNullOrEmpty(dataPoint.Category))
+            {
+                RenderSimpleText(sb, dataPoint.Category, "Helvetica", 8, Color.Black, pointX, y - 10);
+            }
         }
     }
 
-    private void RenderPieChart(StringBuilder sb, Chart chart, double x, double y, double w, double h)
+    private void RenderPieChart(StringBuilder sb, Chart chart, double x, double y, double w, double h, PdfPage page)
     {
         if (chart.Series.Count == 0) return;
 
@@ -1616,21 +2089,18 @@ public class PdfRenderer
         var currentAngle = 0.0;
 
         // Define colors for pie slices
-        var colors = new[] {
-            "0.8 0.2 0.2", "0.2 0.8 0.2", "0.2 0.2 0.8",
-            "0.8 0.8 0.2", "0.8 0.2 0.8", "0.2 0.8 0.8"
-        };
-
         for (int i = 0; i < dataPoints.Count; i++)
         {
             var dataPoint = dataPoints[i];
             var sliceAngle = (dataPoint.Value / totalValue) * 360;
 
             // Set slice color
-            sb.AppendLine($"{colors[i % colors.Length]} rg");
+            sb.AppendLine("q");
+            SetColor(sb, page, GetDefaultChartColor(i));
 
             // Draw pie slice
             sb.AppendLine($"{centerX:F2} {centerY:F2} {radius:F2} {currentAngle:F2} {currentAngle + sliceAngle:F2} ar cn");
+            sb.AppendLine("Q");
 
             currentAngle += sliceAngle;
         }
@@ -1641,35 +2111,74 @@ public class PdfRenderer
         sb.AppendLine($"{centerX:F2} {centerY:F2} {radius:F2} 0 360 ar S");
     }
 
-    private void RenderChartLegend(StringBuilder sb, Chart chart, double x, double y, double w, double h)
+    private void RenderChartLegend(StringBuilder sb, Chart chart, double x, double y, double w, double h, PdfPage page)
     {
-        var legendX = x + 20;
-        var legendY = y + 10;
-        var legendItemHeight = 15;
-
-        sb.AppendLine("BT");
-        sb.AppendLine("/F1 8 Tf");
-        sb.AppendLine("0 0 0 rg");
+        var legendWidth = 110.0;
+        var legendItemHeight = 14.0;
+        var legendHeight = chart.Series.Count * legendItemHeight;
+        var (legendX, legendTop) = GetLegendLayout(chart.Legend?.Position ?? LegendPosition.Right, x, y, w, h, legendWidth, legendHeight);
 
         for (int i = 0; i < chart.Series.Count; i++)
         {
             var series = chart.Series[i];
-            var legendItemY = legendY + i * legendItemHeight;
+            var legendItemY = legendTop - ((i + 1) * legendItemHeight);
+            var fillColor = GetChartSeriesFillColor(series, i);
 
             // Draw legend color box
-            sb.AppendLine("Q");
-            sb.AppendLine("0.4 0.6 0.8 rg");
+            sb.AppendLine("q");
+            SetColor(sb, page, fillColor);
             sb.AppendLine($"{legendX:F2} {legendItemY:F2} 10 10 re f");
-            sb.AppendLine("BT");
-            sb.AppendLine("/F1 8 Tf");
-            sb.AppendLine("0 0 0 rg");
+            sb.AppendLine("Q");
 
             // Draw legend text
-            sb.AppendLine($"{legendX + 15:F2} {legendItemY + 2:F2} Td");
-            sb.AppendLine($"({series.Name ?? $"Series {i + 1}"}) Tj");
+            var seriesName = string.IsNullOrWhiteSpace(series.Name) ? $"Series {i + 1}" : series.Name;
+            RenderSimpleText(sb, seriesName, "Helvetica", 8, Color.Black, legendX + 15, legendItemY + 2);
         }
+    }
 
-        sb.AppendLine("ET");
+    private static Color GetChartSeriesFillColor(ChartSeries series, int index)
+    {
+        return series.Fill?.Color ?? GetDefaultChartColor(index);
+    }
+
+    private static Color GetChartSeriesStrokeColor(ChartSeries series, int index)
+    {
+        return series.Outline?.Color ?? Darken(GetChartSeriesFillColor(series, index), 0.75);
+    }
+
+    private static Color GetDefaultChartColor(int index)
+    {
+        return (index % 6) switch
+        {
+            0 => new Color(51, 102, 204),
+            1 => new Color(153, 51, 102),
+            2 => new Color(46, 184, 92),
+            3 => new Color(214, 143, 48),
+            4 => new Color(94, 84, 163),
+            _ => new Color(44, 162, 173)
+        };
+    }
+
+    private static Color Darken(Color color, double factor)
+    {
+        factor = Math.Clamp(factor, 0, 1);
+        return new Color(
+            (byte)Math.Clamp((int)Math.Round(color.R * factor), 0, 255),
+            (byte)Math.Clamp((int)Math.Round(color.G * factor), 0, 255),
+            (byte)Math.Clamp((int)Math.Round(color.B * factor), 0, 255),
+            color.A);
+    }
+
+    private static (double X, double Top) GetLegendLayout(LegendPosition position, double x, double y, double w, double h, double legendWidth, double legendHeight)
+    {
+        return position switch
+        {
+            LegendPosition.Left => (x + 12, y + h - 24),
+            LegendPosition.Top => (x + (w - legendWidth) / 2, y + h - 12),
+            LegendPosition.Bottom => (x + (w - legendWidth) / 2, y + legendHeight + 12),
+            LegendPosition.TopRight => (x + w - legendWidth - 12, y + h - 12),
+            _ => (x + w - legendWidth - 12, y + h - 24)
+        };
     }
 
     private void RenderSmartArt(StringBuilder sb, SmartArt smartArt, double pageHeight)
@@ -1680,6 +2189,7 @@ public class PdfRenderer
         var y = pageHeight - smartArt.Bounds.YPoints - smartArt.Bounds.HeightPoints;
         var w = smartArt.Bounds.WidthPoints;
         var h = smartArt.Bounds.HeightPoints;
+        var smartArtTitle = ResolveSmartArtTitle(smartArt);
 
         // Draw SmartArt background
         sb.AppendLine("0.95 0.95 0.95 rg");
@@ -1691,14 +2201,9 @@ public class PdfRenderer
         sb.AppendLine($"{x:F2} {y:F2} {w:F2} {h:F2} re S");
 
         // Draw SmartArt title if exists
-        if (!string.IsNullOrEmpty(smartArt.Type))
+        if (!string.IsNullOrEmpty(smartArtTitle))
         {
-            sb.AppendLine("BT");
-            sb.AppendLine("/F1 10 Tf");
-            sb.AppendLine("0 0 0 rg");
-            sb.AppendLine($"{x + 10:F2} {y + h - 15:F2} Td");
-            sb.AppendLine($"({smartArt.Type}) Tj");
-            sb.AppendLine("ET");
+            RenderSimpleText(sb, smartArtTitle, "Helvetica", 10, Color.Black, x + 10, y + h - 15);
         }
 
         // Calculate content area
@@ -1708,7 +2213,7 @@ public class PdfRenderer
         var contentH = h - 40;
 
         // Render based on SmartArt type
-        switch (SmartArt.GetSmartArtType(smartArt.Type))
+        switch (smartArt.ResolvedType)
         {
             case SmartArtType.List:
             case SmartArtType.VerticalBulletList:
@@ -1742,14 +2247,102 @@ public class PdfRenderer
                 break;
             default:
                 // Draw placeholder for unsupported SmartArt types
-                sb.AppendLine("BT");
-                sb.AppendLine("/F1 10 Tf");
-                sb.AppendLine("0.5 0.5 0.5 rg");
-                sb.AppendLine($"{contentX + contentW/2:F2} {contentY + contentH/2:F2} Td");
-                sb.AppendLine($"({SmartArt.GetSmartArtType(smartArt.Type)} SmartArt) Tj");
-                sb.AppendLine("ET");
+                RenderSimpleText(sb, ResolveSmartArtFallbackLabel(smartArt), "Helvetica", 10, new Color(128, 128, 128), contentX + contentW / 2, contentY + contentH / 2);
                 break;
         }
+    }
+
+    private static string? ResolveSmartArtTitle(SmartArt smartArt)
+    {
+        if (!string.IsNullOrWhiteSpace(smartArt.DisplayName))
+            return smartArt.DisplayName;
+
+        if (smartArt.ResolvedType != SmartArtType.Unknown)
+            return SmartArt.GetDisplayName(smartArt.ResolvedType);
+
+        return smartArt.Type;
+    }
+
+    private static string ResolveSmartArtFallbackLabel(SmartArt smartArt)
+    {
+        if (!string.IsNullOrWhiteSpace(smartArt.DisplayName))
+            return $"{smartArt.DisplayName} SmartArt";
+
+        if (smartArt.ResolvedType != SmartArtType.Unknown)
+            return $"{SmartArt.GetDisplayName(smartArt.ResolvedType)} SmartArt";
+
+        return "SmartArt";
+    }
+
+    private void RenderSmartArtTextRuns(StringBuilder sb, IReadOnlyList<SmartArtTextRun> runs, double x, double y)
+    {
+        var normalizedRuns = ExpandSmartArtTextRuns(runs).ToList();
+        if (normalizedRuns.Count == 0)
+            return;
+
+        var currentX = x;
+        var currentY = y;
+        var currentFontSize = 12;
+
+        foreach (var run in normalizedRuns)
+        {
+            if (run.IsLineBreak)
+            {
+                currentY -= Math.Max(1, currentFontSize) * 1.2;
+                currentX = x;
+                continue;
+            }
+
+            currentFontSize = Math.Max(1, run.FontSize);
+            var (r, g, b) = ResolveSmartArtTextColor(run.Color);
+            var color = new Color(
+                (byte)Math.Clamp((int)Math.Round(r * 255), 0, 255),
+                (byte)Math.Clamp((int)Math.Round(g * 255), 0, 255),
+                (byte)Math.Clamp((int)Math.Round(b * 255), 0, 255));
+            RenderSimpleText(sb, run.Text, "Helvetica", currentFontSize, color, currentX, currentY);
+            currentX += EstimateTextWidth(run.Text, currentFontSize);
+        }
+    }
+
+    private static IEnumerable<SmartArtTextRun> ExpandSmartArtTextRuns(IEnumerable<SmartArtTextRun> runs)
+    {
+        foreach (var run in runs)
+        {
+            if (run.IsLineBreak)
+            {
+                yield return run;
+                continue;
+            }
+
+            var normalizedText = run.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+            var segments = normalizedText.Split('\n');
+            for (var i = 0; i < segments.Length; i++)
+            {
+                if (segments[i].Length > 0)
+                {
+                    yield return new SmartArtTextRun(segments[i], run.Bold, run.Italic, run.Underline, run.FontSize, run.Color);
+                }
+
+                if (i < segments.Length - 1)
+                {
+                    yield return SmartArtTextRun.LineBreak(run.FontSize, run.Color);
+                }
+            }
+        }
+    }
+
+    private static (double R, double G, double B) ResolveSmartArtTextColor(string? color)
+    {
+        if (!string.IsNullOrWhiteSpace(color) &&
+            color.Length >= 6 &&
+            int.TryParse(color.AsSpan(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var r) &&
+            int.TryParse(color.AsSpan(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var g) &&
+            int.TryParse(color.AsSpan(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b))
+        {
+            return (r / 255.0, g / 255.0, b / 255.0);
+        }
+
+        return (0, 0, 0);
     }
 
     private void RenderVerticalListSmartArt(StringBuilder sb, SmartArt smartArt, double x, double y, double w, double h)
@@ -1791,28 +2384,7 @@ public class PdfRenderer
             sb.AppendLine($"{nodeX:F2} {nodeY + cornerRadius:F2} l h S");
 
             // Draw node text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{nodeX + 15:F2} {nodeY + nodeH/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, nodeX + 15, nodeY + nodeH / 2);
 
             // Draw bullet point
             sb.AppendLine("0.2 0.4 0.6 rg");
@@ -1859,28 +2431,7 @@ public class PdfRenderer
             sb.AppendLine($"{nodeX:F2} {nodeY + cornerRadius:F2} l h S");
 
             // Draw node text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{nodeX + 10:F2} {nodeY + nodeHeight/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, nodeX + 10, nodeY + nodeHeight / 2);
 
             // Draw connector to next node
             if (i < smartArt.Nodes.Count - 1)
@@ -1938,28 +2489,7 @@ public class PdfRenderer
             sb.AppendLine($"{nodeX:F2} {nodeY + cornerRadius:F2} l h S");
 
             // Draw node text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{nodeX + 10:F2} {nodeY + nodeHeight/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, nodeX + 10, nodeY + nodeHeight / 2);
 
             // Draw connector to next node
             if (i < smartArt.Nodes.Count - 1)
@@ -2014,28 +2544,7 @@ public class PdfRenderer
         sb.AppendLine($"{rootX:F2} {rootY + cornerRadius:F2} l h S");
 
         // Draw root node text with formatting
-        if (rootNode.TextRuns.Count > 0)
-        {
-            sb.AppendLine("BT");
-            sb.AppendLine($"{rootX + rootWidth/2:F2} {rootY + rootHeight/2:F2} Td");
-            
-            foreach (var run in rootNode.TextRuns)
-            {
-                // Set font size
-                sb.AppendLine($"/F1 {run.FontSize} Tf");
-                
-                // Set text color
-                var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                
-                // Draw text
-                sb.AppendLine($"({run.Text}) Tj");
-            }
-            
-            sb.AppendLine("ET");
-        }
+        RenderSmartArtTextRuns(sb, rootNode.TextRuns, rootX + rootWidth / 2, rootY + rootHeight / 2);
 
         // Draw child nodes
         if (smartArt.Nodes.Count > 1)
@@ -2074,28 +2583,7 @@ public class PdfRenderer
                 sb.AppendLine($"{childX:F2} {childY + cornerRadius:F2} l h S");
 
                 // Draw child node text with formatting
-                if (node.TextRuns.Count > 0)
-                {
-                    sb.AppendLine("BT");
-                    sb.AppendLine($"{childX + childWidth/2:F2} {childY + childHeight/2:F2} Td");
-                    
-                    foreach (var run in node.TextRuns)
-                    {
-                        // Set font size
-                        sb.AppendLine($"/F1 {run.FontSize} Tf");
-                        
-                        // Set text color
-                        var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                        
-                        // Draw text
-                        sb.AppendLine($"({run.Text}) Tj");
-                    }
-                    
-                    sb.AppendLine("ET");
-                }
+                RenderSmartArtTextRuns(sb, node.TextRuns, childX + childWidth / 2, childY + childHeight / 2);
 
                 // Draw connector from root to child
                 sb.AppendLine("0.1 0.4 0.6 RG");
@@ -2161,28 +2649,7 @@ public class PdfRenderer
             sb.AppendLine($"{nodeX:F2} {nodeY + cornerRadius:F2} l h S");
 
             // Draw node text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{nodeX + nodeWidth/2:F2} {nodeY + nodeHeight/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, nodeX + nodeWidth / 2, nodeY + nodeHeight / 2);
 
             // Draw connector to next node
             var nextAngle = (i + 1) * angleStep;
@@ -2248,28 +2715,7 @@ public class PdfRenderer
             sb.AppendLine($"{cellX:F2} {cellY + cornerRadius:F2} l h S");
 
             // Draw cell text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{cellX + cellWidth/2:F2} {cellY + cellHeight/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, cellX + cellWidth / 2, cellY + cellHeight / 2);
         }
     }
 
@@ -2307,28 +2753,7 @@ public class PdfRenderer
             sb.AppendLine($"{layerX:F2} {layerY + cornerRadius:F2} l h S");
 
             // Draw layer text with formatting
-            if (node.TextRuns.Count > 0)
-            {
-                sb.AppendLine("BT");
-                sb.AppendLine($"{layerX + layerWidth/2:F2} {layerY + layerHeight/2:F2} Td");
-                
-                foreach (var run in node.TextRuns)
-                {
-                    // Set font size
-                    sb.AppendLine($"/F1 {run.FontSize} Tf");
-                    
-                    // Set text color
-                    var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                    sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                    
-                    // Draw text
-                    sb.AppendLine($"({run.Text}) Tj");
-                }
-                
-                sb.AppendLine("ET");
-            }
+            RenderSmartArtTextRuns(sb, node.TextRuns, layerX + layerWidth / 2, layerY + layerHeight / 2);
         }
     }
 
@@ -2348,27 +2773,9 @@ public class PdfRenderer
         sb.AppendLine($"{centerX:F2} {centerY:F2} {centerRadius:F2} 0 360 ar S");
 
         // Draw center text
-        if (smartArt.Nodes.Count > 0 && smartArt.Nodes[0].TextRuns.Count > 0)
+        if (smartArt.Nodes.Count > 0)
         {
-            sb.AppendLine("BT");
-            sb.AppendLine($"{centerX:F2} {centerY:F2} Td");
-            
-            foreach (var run in smartArt.Nodes[0].TextRuns)
-            {
-                // Set font size
-                sb.AppendLine($"/F1 {run.FontSize} Tf");
-                
-                // Set text color
-                var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                
-                // Draw text
-                sb.AppendLine($"({run.Text}) Tj");
-            }
-            
-            sb.AppendLine("ET");
+            RenderSmartArtTextRuns(sb, smartArt.Nodes[0].TextRuns, centerX, centerY);
         }
 
         // Draw surrounding nodes
@@ -2413,28 +2820,7 @@ public class PdfRenderer
                 sb.AppendLine($"{nodeX:F2} {nodeY + cornerRadius:F2} l h S");
 
                 // Draw node text with formatting
-                if (node.TextRuns.Count > 0)
-                {
-                    sb.AppendLine("BT");
-                    sb.AppendLine($"{nodeX + nodeWidth/2:F2} {nodeY + nodeHeight/2:F2} Td");
-                    
-                    foreach (var run in node.TextRuns)
-                    {
-                        // Set font size
-                        sb.AppendLine($"/F1 {run.FontSize} Tf");
-                        
-                        // Set text color
-                        var r = int.Parse(run.Color.Substring(0, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        var g = int.Parse(run.Color.Substring(2, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        var b = int.Parse(run.Color.Substring(4, 2), System.Globalization.NumberStyles.HexNumber) / 255.0;
-                        sb.AppendLine($"{r:F2} {g:F2} {b:F2} rg");
-                        
-                        // Draw text
-                        sb.AppendLine($"({run.Text}) Tj");
-                    }
-                    
-                    sb.AppendLine("ET");
-                }
+                RenderSmartArtTextRuns(sb, node.TextRuns, nodeX + nodeWidth / 2, nodeY + nodeHeight / 2);
 
                 // Draw connector to center
                 sb.AppendLine("0.4 0.6 0.4 RG");

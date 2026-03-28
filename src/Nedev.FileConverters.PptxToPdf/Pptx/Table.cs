@@ -33,7 +33,7 @@ public class Table
             Bounds = ParseBounds(xfrm);
         }
 
-        var tbl = element.Element(A + "tbl");
+        var tbl = element.Element(A + "tbl") ?? element.Descendants(A + "tbl").FirstOrDefault();
         if (tbl != null)
         {
             Properties = ParseTableProperties(tbl.Element(A + "tblPr"));
@@ -164,7 +164,7 @@ public class Table
         }
 
         // Text body
-        var txBody = tc.Element(P + "txBody");
+        var txBody = tc.Element(A + "txBody") ?? tc.Element(P + "txBody");
         if (txBody != null)
         {
             cell.TextBody = txBody;
@@ -318,8 +318,88 @@ public class Table
             var pPr = p.Element(A + "pPr");
             if (pPr != null)
             {
-                paragraph.Alignment = ParseTextAlignment(pPr.Attribute("algn")?.Value);
+                var alignment = pPr.Attribute("algn")?.Value;
+                if (!string.IsNullOrEmpty(alignment))
+                {
+                    paragraph.Alignment = ParseTextAlignment(alignment);
+                }
                 paragraph.Level = int.TryParse(pPr.Attribute("lvl")?.Value, out var lvl) ? lvl : 0;
+
+                var buNone = pPr.Element(A + "buNone");
+                if (buNone != null)
+                {
+                    paragraph.HasExplicitBulletDefinition = true;
+                    paragraph.BulletType = BulletType.None;
+                }
+                else
+                {
+                    var buAutoNum = pPr.Element(A + "buAutoNum");
+                    if (buAutoNum != null)
+                    {
+                        paragraph.HasExplicitBulletDefinition = true;
+                        paragraph.BulletType = BulletType.AutoNumber;
+                        paragraph.BulletAutoNumberType = buAutoNum.Attribute("type")?.Value;
+                        paragraph.BulletStartAt = int.TryParse(buAutoNum.Attribute("startAt")?.Value, out var startAt) ? startAt : 1;
+                    }
+                    else
+                    {
+                        var buChar = pPr.Element(A + "buChar");
+                        if (buChar != null)
+                        {
+                            paragraph.HasExplicitBulletDefinition = true;
+                            paragraph.BulletType = BulletType.Char;
+                            paragraph.BulletChar = buChar.Attribute("char")?.Value;
+                        }
+                    }
+
+                    var buSzPct = pPr.Element(A + "buSzPct");
+                    if (buSzPct != null)
+                    {
+                        paragraph.BulletSize = int.TryParse(buSzPct.Attribute("val")?.Value, out var bulletSize) ? bulletSize / 100000.0 : 1;
+                    }
+
+                    var buFont = pPr.Element(A + "buFont");
+                    if (buFont != null)
+                    {
+                        paragraph.BulletFont = buFont.Attribute("typeface")?.Value;
+                    }
+
+                    var buClr = pPr.Element(A + "buClr");
+                    if (buClr != null)
+                    {
+                        paragraph.BulletColor = Shape.ParseColor(buClr);
+                    }
+                }
+
+                var marL = pPr.Attribute("marL");
+                if (marL != null)
+                    paragraph.MarginLeft = long.TryParse(marL.Value, out var marginLeft) ? marginLeft : 0;
+
+                var marR = pPr.Attribute("marR");
+                if (marR != null)
+                    paragraph.MarginRight = long.TryParse(marR.Value, out var marginRight) ? marginRight : 0;
+
+                var indent = pPr.Attribute("indent");
+                if (indent != null)
+                    paragraph.Indent = long.TryParse(indent.Value, out var paragraphIndent) ? paragraphIndent : 0;
+
+                var lnSpc = pPr.Element(A + "lnSpc");
+                if (lnSpc != null)
+                {
+                    paragraph.LineSpacing = ParseSpacing(lnSpc);
+                }
+
+                var spcBef = pPr.Element(A + "spcBef");
+                if (spcBef != null)
+                {
+                    paragraph.SpaceBefore = ParseSpacing(spcBef);
+                }
+
+                var spcAft = pPr.Element(A + "spcAft");
+                if (spcAft != null)
+                {
+                    paragraph.SpaceAfter = ParseSpacing(spcAft);
+                }
             }
 
             foreach (var r in p.Elements(A + "r"))
@@ -333,6 +413,18 @@ public class Table
                 }
 
                 var rPr = r.Element(A + "rPr");
+                if (rPr != null)
+                {
+                    run.Properties = ParseRunProperties(rPr);
+                }
+
+                paragraph.Runs.Add(run);
+            }
+
+            foreach (var br in p.Elements(A + "br"))
+            {
+                var run = new Run { Text = "\n" };
+                var rPr = br.Element(A + "rPr");
                 if (rPr != null)
                 {
                     run.Properties = ParseRunProperties(rPr);
@@ -357,6 +449,23 @@ public class Table
             "dist" => TextAlignment.Distributed,
             _ => TextAlignment.Left
         };
+    }
+
+    private static Spacing? ParseSpacing(XElement spacingElement)
+    {
+        var spcPct = spacingElement.Element(A + "spcPct");
+        if (spcPct != null && int.TryParse(spcPct.Attribute("val")?.Value, out var percent))
+        {
+            return new Spacing { Percent = percent / 1000.0 };
+        }
+
+        var spcPts = spacingElement.Element(A + "spcPts");
+        if (spcPts != null && int.TryParse(spcPts.Attribute("val")?.Value, out var points))
+        {
+            return new Spacing { Points = points / 100.0 };
+        }
+
+        return null;
     }
 
     private static RunProperties ParseRunProperties(XElement rPr)

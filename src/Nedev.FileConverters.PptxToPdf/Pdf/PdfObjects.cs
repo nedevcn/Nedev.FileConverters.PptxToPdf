@@ -260,13 +260,18 @@ public class PdfImage : PdfObject
     public int Width { get; }
     public int Height { get; }
     public bool IsJpeg { get; }
+    public string ColorSpace { get; }
+    public int BitsPerComponent { get; }
+    public PdfImage? SoftMask { get; set; }
 
-    public PdfImage(int number, byte[] data, int width, int height, bool isJpeg) : base(number)
+    public PdfImage(int number, byte[] data, int width, int height, bool isJpeg, string colorSpace = "/DeviceRGB", int bitsPerComponent = 8) : base(number)
     {
         Data = data;
         Width = width;
         Height = height;
         IsJpeg = isJpeg;
+        ColorSpace = colorSpace;
+        BitsPerComponent = bitsPerComponent;
     }
 
     public override void WriteTo(Stream stream)
@@ -276,12 +281,21 @@ public class PdfImage : PdfObject
         WriteLine(stream, "/Subtype /Image");
         WriteLine(stream, $"/Width {Width}");
         WriteLine(stream, $"/Height {Height}");
-        WriteLine(stream, "/ColorSpace /DeviceRGB");
-        WriteLine(stream, "/BitsPerComponent 8");
+        WriteLine(stream, $"/ColorSpace {ColorSpace}");
+        WriteLine(stream, $"/BitsPerComponent {BitsPerComponent}");
 
         if (IsJpeg)
         {
             WriteLine(stream, "/Filter /DCTDecode");
+        }
+        else
+        {
+            WriteLine(stream, "/Filter /FlateDecode");
+        }
+
+        if (SoftMask != null)
+        {
+            WriteLine(stream, $"/SMask {SoftMask.Number} 0 R");
         }
 
         WriteLine(stream, $"/Length {Data.Length}");
@@ -295,9 +309,9 @@ public class PdfImage : PdfObject
 
 public class PdfAnnotation : PdfObject
 {
-    public string Type { get; set; }
-    public string Subtype { get; set; }
-    public double[] Rect { get; set; }
+    public string Type { get; set; } = string.Empty;
+    public string Subtype { get; set; } = string.Empty;
+    public double[] Rect { get; set; } = Array.Empty<double>();
     public PdfAction? Action { get; set; }
 
     public PdfAnnotation(int number) : base(number)
@@ -326,9 +340,9 @@ public class PdfAnnotation : PdfObject
 
 public class PdfAction : PdfObject
 {
-    public string Type { get; set; }
-    public string S { get; set; }
-    public string URI { get; set; }
+    public string Type { get; set; } = string.Empty;
+    public string S { get; set; } = string.Empty;
+    public string URI { get; set; } = string.Empty;
 
     public PdfAction(int number = 0) : base(number)
     {

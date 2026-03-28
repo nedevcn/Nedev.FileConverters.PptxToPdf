@@ -40,12 +40,13 @@ class Program
             
             if (useCoreConverter)
             {
-                // Use the Core package's Converter entry point
+                // Use the Core package entry point after explicit registration.
                 using var inputStream = File.OpenRead(pptxFilePath);
-                using var outputStream = File.Create(pdfFilePath);
+                PptxToPdfCoreRegistration.EnsureRegistered();
                 using var convertedStream = Converter.Convert(inputStream, "pptx", "pdf");
+                using var outputStream = File.Create(pdfFilePath);
                 convertedStream.CopyTo(outputStream);
-                Console.WriteLine("Conversion completed successfully using Core Converter!");
+                Console.WriteLine("Conversion completed successfully using the Core entry point!");
             }
             else
             {
@@ -69,7 +70,7 @@ class Program
         Console.WriteLine("  Nedev.FileConverters.PptxToPdf.Cli <input.pptx> <output.pdf> [options]");
         Console.WriteLine("Options:");
         Console.WriteLine("  --parallel, -p    Use parallel processing for faster conversion (direct mode only)");
-        Console.WriteLine("  --core, -c        Use the Core package's Converter entry point");
+        Console.WriteLine("  --core, -c        Register with Core and use the Converter entry point");
         Console.WriteLine("  --help, -h        Show this help message");
     }
 }

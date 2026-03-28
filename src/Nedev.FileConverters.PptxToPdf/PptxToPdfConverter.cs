@@ -21,87 +21,9 @@ public class PptxToPdfConverter
 
         try
         {
-            OnProgressChanged(0, "Starting conversion...");
-
             using var pptx = PptxDocument.Open(pptxFilePath);
             using var pdf = new PdfDocument(pdfFilePath);
-
-            pdf.Initialize();
-
-            int slideCount = pptx.Slides.Count;
-
-            if (useParallelProcessing && slideCount > 1)
-            {
-                // Use parallel processing for multiple slides
-                var renderer = new PdfRenderer(pdf);
-                var slideTasks = new List<Task>();
-                var progressLock = new object();
-                int processedSlides = 0;
-
-                for (int i = 0; i < slideCount; i++)
-                {
-                    var slideIndex = i;
-                    slideTasks.Add(Task.Run(() =>
-                    {
-                        var slide = pptx.Slides[slideIndex];
-                        if (pptx.Presentation == null) return;
-
-                        try
-                        {
-                            var width = pptx.Presentation.SlideWidth / 914400.0 * 72;
-                            var height = pptx.Presentation.SlideHeight / 914400.0 * 72;
-
-                            lock (pdf) // Ensure thread-safe access to PDF document
-                            {
-                                var page = pdf.AddPage(width, height);
-                                renderer.RenderSlide(page, slide, pptx);
-                            }
-
-                            lock (progressLock)
-                            {
-                                processedSlides++;
-                                OnProgressChanged(processedSlides * 100 / slideCount, $"Processing slide {processedSlides}/{slideCount}");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            OnErrorOccurred(ex, $"Error processing slide {slideIndex + 1}");
-                        }
-                    }));
-                }
-
-                Task.WaitAll(slideTasks.ToArray());
-            }
-            else
-            {
-                // Use sequential processing
-                var renderer = new PdfRenderer(pdf);
-
-                for (int i = 0; i < slideCount; i++)
-                {
-                    var slide = pptx.Slides[i];
-                    if (pptx.Presentation == null) continue;
-
-                    try
-                    {
-                        OnProgressChanged((i + 1) * 100 / slideCount, $"Processing slide {i + 1}/{slideCount}");
-
-                        var width = pptx.Presentation.SlideWidth / 914400.0 * 72;
-                        var height = pptx.Presentation.SlideHeight / 914400.0 * 72;
-
-                        var page = pdf.AddPage(width, height);
-                        renderer.RenderSlide(page, slide, pptx);
-                    }
-                    catch (Exception ex)
-                    {
-                        OnErrorOccurred(ex, $"Error processing slide {i + 1}");
-                        // Continue processing other slides
-                    }
-                }
-            }
-
-            pdf.Save();
-            OnProgressChanged(100, "Conversion completed successfully");
+            ConvertInternal(pptx, pdf, useParallelProcessing);
         }
         catch (Exception ex)
         {
@@ -120,93 +42,96 @@ public class PptxToPdfConverter
 
         try
         {
-            OnProgressChanged(0, "Starting conversion...");
-
             using var pptx = PptxDocument.Open(pptxStream);
             using var pdf = new PdfDocument(pdfStream);
-
-            pdf.Initialize();
-
-            int slideCount = pptx.Slides.Count;
-
-            if (useParallelProcessing && slideCount > 1)
-            {
-                // Use parallel processing for multiple slides
-                var renderer = new PdfRenderer(pdf);
-                var slideTasks = new List<Task>();
-                var progressLock = new object();
-                int processedSlides = 0;
-
-                for (int i = 0; i < slideCount; i++)
-                {
-                    var slideIndex = i;
-                    slideTasks.Add(Task.Run(() =>
-                    {
-                        var slide = pptx.Slides[slideIndex];
-                        if (pptx.Presentation == null) return;
-
-                        try
-                        {
-                            var width = pptx.Presentation.SlideWidth / 914400.0 * 72;
-                            var height = pptx.Presentation.SlideHeight / 914400.0 * 72;
-
-                            lock (pdf) // Ensure thread-safe access to PDF document
-                            {
-                                var page = pdf.AddPage(width, height);
-                                renderer.RenderSlide(page, slide, pptx);
-                            }
-
-                            lock (progressLock)
-                            {
-                                processedSlides++;
-                                OnProgressChanged(processedSlides * 100 / slideCount, $"Processing slide {processedSlides}/{slideCount}");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            OnErrorOccurred(ex, $"Error processing slide {slideIndex + 1}");
-                        }
-                    }));
-                }
-
-                Task.WaitAll(slideTasks.ToArray());
-            }
-            else
-            {
-                // Use sequential processing
-                var renderer = new PdfRenderer(pdf);
-
-                for (int i = 0; i < slideCount; i++)
-                {
-                    var slide = pptx.Slides[i];
-                    if (pptx.Presentation == null) continue;
-
-                    try
-                    {
-                        OnProgressChanged((i + 1) * 100 / slideCount, $"Processing slide {i + 1}/{slideCount}");
-
-                        var width = pptx.Presentation.SlideWidth / 914400.0 * 72;
-                        var height = pptx.Presentation.SlideHeight / 914400.0 * 72;
-
-                        var page = pdf.AddPage(width, height);
-                        renderer.RenderSlide(page, slide, pptx);
-                    }
-                    catch (Exception ex)
-                    {
-                        OnErrorOccurred(ex, $"Error processing slide {i + 1}");
-                        // Continue processing other slides
-                    }
-                }
-            }
-
-            pdf.Save();
-            OnProgressChanged(100, "Conversion completed successfully");
+            ConvertInternal(pptx, pdf, useParallelProcessing);
         }
         catch (Exception ex)
         {
             OnErrorOccurred(ex, "Error during conversion");
             throw;
         }
+    }
+
+    private void ConvertInternal(PptxDocument pptx, PdfDocument pdf, bool useParallelProcessing)
+    {
+        OnProgressChanged(0, "Starting conversion...");
+
+        pdf.Initialize();
+
+        var presentation = pptx.Presentation
+            ?? throw new InvalidOperationException("Presentation metadata could not be loaded from the PPTX file.");
+
+        int slideCount = pptx.Slides.Count;
+        if (slideCount == 0)
+        {
+            pdf.Save();
+            OnProgressChanged(100, "Conversion completed successfully (no slides found)");
+            return;
+        }
+
+        var slideWidth = presentation.SlideWidth / 914400.0 * 72;
+        var slideHeight = presentation.SlideHeight / 914400.0 * 72;
+        var renderer = new PdfRenderer(pdf);
+
+        if (useParallelProcessing && slideCount > 1)
+        {
+            var pages = new PdfPage[slideCount];
+            for (int i = 0; i < slideCount; i++)
+            {
+                pages[i] = pdf.AddPage(slideWidth, slideHeight);
+            }
+
+            var progressLock = new object();
+            var slideTasks = new List<Task>(slideCount);
+            int processedSlides = 0;
+
+            for (int i = 0; i < slideCount; i++)
+            {
+                var slideIndex = i;
+                slideTasks.Add(Task.Run(() =>
+                {
+                    try
+                    {
+                        lock (pdf)
+                        {
+                            renderer.RenderSlide(pages[slideIndex], pptx.Slides[slideIndex], pptx);
+                        }
+
+                        lock (progressLock)
+                        {
+                            processedSlides++;
+                            OnProgressChanged(processedSlides * 100 / slideCount, $"Processing slide {processedSlides}/{slideCount}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        OnErrorOccurred(ex, $"Error processing slide {slideIndex + 1}");
+                    }
+                }));
+            }
+
+            Task.WaitAll(slideTasks.ToArray());
+        }
+        else
+        {
+            for (int i = 0; i < slideCount; i++)
+            {
+                try
+                {
+                    var page = pdf.AddPage(slideWidth, slideHeight);
+                    renderer.RenderSlide(page, pptx.Slides[i], pptx);
+                    OnProgressChanged((i + 1) * 100 / slideCount, $"Processing slide {i + 1}/{slideCount}");
+                }
+                catch (Exception ex)
+                {
+                    OnErrorOccurred(ex, $"Error processing slide {i + 1}");
+                }
+            }
+        }
+
+        pdf.Save();
+        OnProgressChanged(100, "Conversion completed successfully");
     }
 
     protected virtual void OnProgressChanged(int progress, string message)

@@ -2,7 +2,7 @@ namespace Nedev.FileConverters.PptxToPdf;
 
 public class Paragraph
 {
-    public TextAlignment Alignment { get; set; } = TextAlignment.Left;
+    public TextAlignment? Alignment { get; set; }
     public int Level { get; set; }
     public long DefaultTabSize { get; set; } = 914400;
     public bool RightToLeft { get; set; }
@@ -22,6 +22,7 @@ public class Paragraph
 
     // Bullet
     public BulletType BulletType { get; set; } = BulletType.None;
+    public bool HasExplicitBulletDefinition { get; set; }
     public string? BulletChar { get; set; }
     public string? BulletAutoNumberType { get; set; }
     public int BulletStartAt { get; set; } = 1;

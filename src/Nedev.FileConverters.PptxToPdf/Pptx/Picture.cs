@@ -11,13 +11,15 @@ public class Picture
 
     public string? Id { get; }
     public string? Name { get; }
+    public string? SourcePath { get; }
     public Rect Bounds { get; }
     public string? ImageRelationshipId { get; }
     public ShapeEffects? Effects { get; }
 
-    public Picture(XElement element)
+    public Picture(XElement element, string? sourcePath = null)
     {
         _element = element;
+        SourcePath = sourcePath;
 
         var nvPicPr = element.Element(P + "nvPicPr");
         if (nvPicPr != null)

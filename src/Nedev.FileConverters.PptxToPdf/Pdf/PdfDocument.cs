@@ -1,12 +1,14 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using Nedev.FileConverters.PptxToPdf.Image;
 
 namespace Nedev.FileConverters.PptxToPdf.Pdf;
 
 public class PdfDocument : IDisposable
 {
     private readonly Stream _stream;
+    private readonly bool _ownsStream;
     private readonly List<PdfObject> _objects = new();
     private readonly Dictionary<int, long> _offsets = new();
     private int _objectNumber = 1;
@@ -18,11 +20,13 @@ public class PdfDocument : IDisposable
     public PdfDocument(string filePath)
     {
         _stream = File.Create(filePath);
+        _ownsStream = true;
     }
 
     public PdfDocument(Stream stream)
     {
         _stream = stream;
+        _ownsStream = false;
     }
 
     public EmbeddedFontManager GetEmbeddedFontManager()
@@ -59,6 +63,24 @@ public class PdfDocument : IDisposable
     public PdfImage AddImage(byte[] imageData, int width, int height, bool isJpeg = false)
     {
         var image = new PdfImage(_objectNumber++, imageData, width, height, isJpeg);
+        _objects.Add(image);
+        return image;
+    }
+
+    public PdfImage AddImage(PreparedImageData imageData)
+    {
+        PdfImage? softMask = null;
+        if (imageData.AlphaMaskData != null)
+        {
+            softMask = new PdfImage(_objectNumber++, imageData.AlphaMaskData, imageData.Width, imageData.Height, isJpeg: false, colorSpace: "/DeviceGray");
+            _objects.Add(softMask);
+        }
+
+        var image = new PdfImage(_objectNumber++, imageData.Data, imageData.Width, imageData.Height, imageData.IsJpeg)
+        {
+            SoftMask = softMask
+        };
+
         _objects.Add(image);
         return image;
     }
@@ -197,6 +219,9 @@ public class PdfDocument : IDisposable
 
     public void Dispose()
     {
-        _stream.Dispose();
+        if (_ownsStream)
+        {
+            _stream.Dispose();
+        }
     }
 }

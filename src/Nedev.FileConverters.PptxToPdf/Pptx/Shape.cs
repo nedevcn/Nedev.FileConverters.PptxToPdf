@@ -1,20 +1,26 @@
 using System.Xml.Linq;
+using System.Threading;
 
 namespace Nedev.FileConverters.PptxToPdf.Pptx;
 
 public class Shape
 {
     private readonly XElement _element;
+    private static readonly AsyncLocal<Func<SchemeColor, Color>?> SchemeColorResolver = new();
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/presentationml/2006/main";
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     public string? Id { get; }
     public string? Name { get; }
+    public string? SourcePath { get; }
     public ShapeType ShapeType { get; }
     public bool IsPlaceholder { get; }
     public PlaceholderType PlaceholderType { get; }
+    public int? PlaceholderIndex { get; }
     public bool HasText => !string.IsNullOrEmpty(Text);
+    public bool HasLocalShapeProperties { get; }
+    public bool HasLocalGeometry { get; }
 
     public Rect Bounds { get; }
     public string? Text { get; }
@@ -28,9 +34,10 @@ public class Shape
     public int? ZOrder { get; }
     public Hyperlink? Hyperlink { get; }
 
-    public Shape(XElement element)
+    public Shape(XElement element, string? sourcePath = null)
     {
         _element = element;
+        SourcePath = sourcePath;
 
         var nvSpPr = element.Element(P + "nvSpPr");
         if (nvSpPr != null)
@@ -48,11 +55,13 @@ public class Shape
                 if (ph != null)
                 {
                     PlaceholderType = ParsePlaceholderType(ph.Attribute("type")?.Value);
+                    PlaceholderIndex = int.TryParse(ph.Attribute("idx")?.Value, out var idx) ? idx : null;
                 }
             }
         }
 
         var spPr = element.Element(P + "spPr");
+        HasLocalShapeProperties = spPr != null;
         if (spPr != null)
         {
             ShapeType = ParseShapeType(spPr);
@@ -62,6 +71,7 @@ public class Shape
             Effects = ParseEffects(spPr);
             Transform = ParseTransform(spPr);
             Geometry = ParseGeometry(spPr);
+            HasLocalGeometry = spPr.Element(A + "prstGeom") != null || spPr.Element(A + "custGeom") != null;
         }
         else
         {
@@ -82,6 +92,43 @@ public class Shape
         {
             Hyperlink = new Hyperlink(hlinkClick);
         }
+    }
+
+    private Shape(Shape source, Shape? placeholderBase, TextStyles? textStyles)
+    {
+        _element = source._element;
+        Id = source.Id;
+        Name = source.Name;
+        SourcePath = source.SourcePath ?? placeholderBase?.SourcePath;
+        IsPlaceholder = source.IsPlaceholder;
+        PlaceholderType = source.PlaceholderType;
+        PlaceholderIndex = source.PlaceholderIndex;
+        HasLocalShapeProperties = source.HasLocalShapeProperties;
+        HasLocalGeometry = source.HasLocalGeometry;
+
+        ShapeType = source.HasLocalGeometry || placeholderBase == null
+            ? source.ShapeType
+            : placeholderBase.ShapeType;
+        Bounds = HasBounds(source.Bounds) ? source.Bounds : placeholderBase?.Bounds ?? source.Bounds;
+        Fill = source.Fill ?? placeholderBase?.Fill;
+        Outline = source.Outline ?? placeholderBase?.Outline;
+        Effects = source.Effects ?? placeholderBase?.Effects;
+        Transform = source.Transform ?? placeholderBase?.Transform;
+        Geometry = source.Geometry ?? placeholderBase?.Geometry;
+        ZOrder = source.ZOrder ?? placeholderBase?.ZOrder;
+        Hyperlink = source.Hyperlink ?? placeholderBase?.Hyperlink;
+
+        TextProperties = MergeTextProperties(source.TextProperties, placeholderBase?.TextProperties);
+        var paragraphSource = source.Paragraphs.Any() ? source.Paragraphs : placeholderBase?.Paragraphs ?? [];
+        Paragraphs = MergeParagraphs(paragraphSource, textStyles?.GetStyleForPlaceholder(PlaceholderType));
+        Text = BuildText(Paragraphs);
+    }
+
+    public static IDisposable UseSchemeColorResolver(Func<SchemeColor, Color>? resolver)
+    {
+        var previousResolver = SchemeColorResolver.Value;
+        SchemeColorResolver.Value = resolver;
+        return new ResolverScope(() => SchemeColorResolver.Value = previousResolver);
     }
 
     private static ShapeType ParseShapeType(XElement spPr)
@@ -528,7 +575,11 @@ public class Shape
             var pPr = p.Element(A + "pPr");
             if (pPr != null)
             {
-                paragraph.Alignment = ParseTextAlignment(pPr.Attribute("algn")?.Value);
+                var alignment = pPr.Attribute("algn")?.Value;
+                if (!string.IsNullOrEmpty(alignment))
+                {
+                    paragraph.Alignment = ParseTextAlignment(alignment);
+                }
                 paragraph.Level = int.TryParse(pPr.Attribute("lvl")?.Value, out var lvl) ? lvl : 0;
                 paragraph.DefaultTabSize = int.TryParse(pPr.Attribute("defTabSz")?.Value, out var dts) ? dts : 914400;
                 paragraph.RightToLeft = pPr.Attribute("rtl")?.Value == "1";
@@ -540,6 +591,7 @@ public class Shape
                 var buNone = pPr.Element(A + "buNone");
                 if (buNone != null)
                 {
+                    paragraph.HasExplicitBulletDefinition = true;
                     paragraph.BulletType = BulletType.None;
                 }
                 else
@@ -547,6 +599,7 @@ public class Shape
                     var buAutoNum = pPr.Element(A + "buAutoNum");
                     if (buAutoNum != null)
                     {
+                        paragraph.HasExplicitBulletDefinition = true;
                         paragraph.BulletType = BulletType.AutoNumber;
                         paragraph.BulletAutoNumberType = buAutoNum.Attribute("type")?.Value;
                         paragraph.BulletStartAt = int.TryParse(buAutoNum.Attribute("startAt")?.Value, out var sa) ? sa : 1;
@@ -556,6 +609,7 @@ public class Shape
                         var buChar = pPr.Element(A + "buChar");
                         if (buChar != null)
                         {
+                            paragraph.HasExplicitBulletDefinition = true;
                             paragraph.BulletType = BulletType.Char;
                             paragraph.BulletChar = buChar.Attribute("char")?.Value;
                         }
@@ -564,6 +618,7 @@ public class Shape
                             var buBlip = pPr.Element(A + "buBlip");
                             if (buBlip != null)
                             {
+                                paragraph.HasExplicitBulletDefinition = true;
                                 paragraph.BulletType = BulletType.Blip;
                             }
                         }
@@ -573,7 +628,7 @@ public class Shape
                     var buSzPct = pPr.Element(A + "buSzPct");
                     if (buSzPct != null)
                     {
-                        paragraph.BulletSize = int.TryParse(buSzPct.Attribute("val")?.Value, out var bs) ? bs / 1000.0 : 1;
+                        paragraph.BulletSize = int.TryParse(buSzPct.Attribute("val")?.Value, out var bs) ? bs / 100000.0 : 1;
                     }
 
                     var buFont = pPr.Element(A + "buFont");
@@ -833,7 +888,7 @@ public class Shape
                 "ctr" => TextAnchor.Middle,
                 "just" => TextAnchor.TopCentered,
                 "dist" => TextAnchor.BottomCentered,
-                _ => TextAnchor.Middle
+                _ => TextAnchor.Top
             };
         }
 
@@ -859,8 +914,8 @@ public class Shape
             if (normAutofit != null)
             {
                 props.AutoFit = TextAutoFit.Normal;
-                props.FontScale = int.TryParse(normAutofit.Attribute("fontScale")?.Value, out var fs) ? fs / 1000.0 : 1;
-                props.LineSpaceReduction = int.TryParse(normAutofit.Attribute("lnSpcReduction")?.Value, out var lsr) ? lsr / 1000.0 : 0;
+                props.FontScale = ParseAutofitScale(normAutofit.Attribute("fontScale")?.Value, 1);
+                props.LineSpaceReduction = ParseAutofitScale(normAutofit.Attribute("lnSpcReduction")?.Value, 0);
             }
             else
             {
@@ -890,6 +945,21 @@ public class Shape
         return props;
     }
 
+    private static double ParseAutofitScale(string? rawValue, double defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+            return defaultValue;
+
+        if (!double.TryParse(rawValue, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedValue))
+            return defaultValue;
+
+        var normalizedValue = parsedValue / 100000.0;
+        if (double.IsNaN(normalizedValue) || double.IsInfinity(normalizedValue))
+            return defaultValue;
+
+        return Math.Clamp(normalizedValue, 0, 1);
+    }
+
     public static Color? ParseColor(XElement parent)
     {
         // sRGB color
@@ -903,16 +973,7 @@ public class Shape
                     byte.TryParse(val.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out var g) &&
                     byte.TryParse(val.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
                 {
-                    var color = new Color(r, g, b);
-
-                    // Apply color transformations
-                    var alpha = srgbClr.Element(A + "alpha");
-                    if (alpha != null && int.TryParse(alpha.Attribute("val")?.Value, out var a))
-                    {
-                        color = color.WithAlpha((byte)(a / 1000));
-                    }
-
-                    return color;
+                    return ApplyColorTransforms(new Color(r, g, b), srgbClr);
                 }
             }
         }
@@ -922,9 +983,9 @@ public class Shape
         if (schemeClr != null)
         {
             var val = schemeClr.Attribute("val")?.Value;
-            if (Enum.TryParse<SchemeColor>(val, true, out var schemeColor))
+            if (TryParseSchemeColor(val, out var schemeColor))
             {
-                return Color.FromSchemeColor(schemeColor);
+                return ApplyColorTransforms(ResolveSchemeColor(schemeColor), schemeClr);
             }
         }
 
@@ -935,7 +996,7 @@ public class Shape
             var val = prstClr.Attribute("val")?.Value;
             if (Enum.TryParse<PresetColor>(val, true, out var presetColor))
             {
-                return Color.FromPresetColor(presetColor);
+                return ApplyColorTransforms(Color.FromPresetColor(presetColor), prstClr);
             }
         }
 
@@ -950,7 +1011,7 @@ public class Shape
                     byte.TryParse(lastClr.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out var g) &&
                     byte.TryParse(lastClr.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
                 {
-                    return new Color(r, g, b);
+                    return ApplyColorTransforms(new Color(r, g, b), sysClr);
                 }
             }
         }
@@ -962,9 +1023,374 @@ public class Shape
             var hue = int.TryParse(hslClr.Attribute("hue")?.Value, out var h) ? h / 60000 : 0;
             var sat = int.TryParse(hslClr.Attribute("sat")?.Value, out var s) ? s / 1000.0 : 0;
             var lum = int.TryParse(hslClr.Attribute("lum")?.Value, out var l) ? l / 1000.0 : 0;
-            return Color.FromHsl(hue, sat, lum);
-    }
+            return ApplyColorTransforms(Color.FromHsl(hue, sat, lum), hslClr);
+        }
 
         return null;
+    }
+
+    private static bool TryParseSchemeColor(string? value, out SchemeColor schemeColor)
+    {
+        switch (value)
+        {
+            case "bg1":
+                schemeColor = SchemeColor.Background1;
+                return true;
+            case "tx1":
+                schemeColor = SchemeColor.Text1;
+                return true;
+            case "bg2":
+                schemeColor = SchemeColor.Background2;
+                return true;
+            case "tx2":
+                schemeColor = SchemeColor.Text2;
+                return true;
+            case "accent1":
+                schemeColor = SchemeColor.Accent1;
+                return true;
+            case "accent2":
+                schemeColor = SchemeColor.Accent2;
+                return true;
+            case "accent3":
+                schemeColor = SchemeColor.Accent3;
+                return true;
+            case "accent4":
+                schemeColor = SchemeColor.Accent4;
+                return true;
+            case "accent5":
+                schemeColor = SchemeColor.Accent5;
+                return true;
+            case "accent6":
+                schemeColor = SchemeColor.Accent6;
+                return true;
+            case "hlink":
+                schemeColor = SchemeColor.Hyperlink;
+                return true;
+            case "folHlink":
+                schemeColor = SchemeColor.FollowedHyperlink;
+                return true;
+            case "dk1":
+                schemeColor = SchemeColor.Dark1;
+                return true;
+            case "lt1":
+                schemeColor = SchemeColor.Light1;
+                return true;
+            case "dk2":
+                schemeColor = SchemeColor.Dark2;
+                return true;
+            case "lt2":
+                schemeColor = SchemeColor.Light2;
+                return true;
+            default:
+                return Enum.TryParse(value, true, out schemeColor);
+        }
+    }
+
+    private static Color ApplyColorTransforms(Color color, XElement colorElement)
+    {
+        var transformed = color;
+
+        foreach (var transform in colorElement.Elements())
+        {
+            if (!int.TryParse(transform.Attribute("val")?.Value, out var value))
+                continue;
+
+            var factor = Math.Clamp(value / 100000.0, 0, 1);
+
+            switch (transform.Name.LocalName)
+            {
+                case "alpha":
+                    transformed = transformed.WithAlpha((byte)Math.Round(255 * factor));
+                    break;
+                case "tint":
+                    transformed = TransformColor(transformed, channel => channel + (255 - channel) * factor);
+                    break;
+                case "shade":
+                    transformed = TransformColor(transformed, channel => channel * factor);
+                    break;
+                case "lumMod":
+                    transformed = TransformColor(transformed, channel => channel * factor);
+                    break;
+                case "lumOff":
+                    transformed = TransformColor(transformed, channel => channel + 255 * factor);
+                    break;
+            }
+        }
+
+        return transformed;
+    }
+
+    private static Color TransformColor(Color color, Func<double, double> transform)
+    {
+        return new Color(
+            ClampToByte(transform(color.R)),
+            ClampToByte(transform(color.G)),
+            ClampToByte(transform(color.B)),
+            color.A);
+    }
+
+    private static byte ClampToByte(double value)
+    {
+        return (byte)Math.Clamp((int)Math.Round(value), 0, 255);
+    }
+
+    private static Color ResolveSchemeColor(SchemeColor schemeColor)
+    {
+        return SchemeColorResolver.Value?.Invoke(schemeColor) ?? Color.FromSchemeColor(schemeColor);
+    }
+
+    public Shape ResolvePlaceholder(Shape? placeholderBase, TextStyles? textStyles)
+    {
+        return new Shape(this, placeholderBase, textStyles);
+    }
+
+    public bool MatchesPlaceholder(Shape candidate)
+    {
+        if (!IsPlaceholder || !candidate.IsPlaceholder)
+            return false;
+
+        if (PlaceholderIndex.HasValue && candidate.PlaceholderIndex.HasValue)
+            return PlaceholderIndex.Value == candidate.PlaceholderIndex.Value;
+
+        if (PlaceholderType != PlaceholderType.None && candidate.PlaceholderType != PlaceholderType.None)
+            return PlaceholderType == candidate.PlaceholderType;
+
+        if (PlaceholderIndex.HasValue || candidate.PlaceholderIndex.HasValue)
+            return PlaceholderIndex == candidate.PlaceholderIndex;
+
+        return false;
+    }
+
+    private static bool HasBounds(Rect rect)
+    {
+        return rect.Width > 0 && rect.Height > 0;
+    }
+
+    private static string? BuildText(IEnumerable<Paragraph> paragraphs)
+    {
+        var lines = paragraphs
+            .Select(paragraph => paragraph.GetFullText())
+            .Where(text => !string.IsNullOrEmpty(text))
+            .ToList();
+
+        return lines.Count > 0 ? string.Join("\n", lines) : null;
+    }
+
+    private static TextProperties? MergeTextProperties(TextProperties? primary, TextProperties? fallback)
+    {
+        if (primary == null)
+            return fallback == null ? null : CloneTextProperties(fallback);
+
+        if (fallback == null)
+            return CloneTextProperties(primary);
+
+        return new TextProperties
+        {
+            FontSize = primary.FontSize ?? fallback.FontSize,
+            Bold = primary.Bold ?? fallback.Bold,
+            Italic = primary.Italic ?? fallback.Italic,
+            FontFamily = primary.FontFamily ?? fallback.FontFamily,
+            Color = primary.Color ?? fallback.Color,
+            Alignment = primary.Alignment ?? fallback.Alignment,
+            TextDirection = primary.TextDirection,
+            Anchor = primary.Anchor,
+            WrapText = primary.WrapText,
+            LeftInset = primary.LeftInset,
+            TopInset = primary.TopInset,
+            RightInset = primary.RightInset,
+            BottomInset = primary.BottomInset,
+            AutoFit = primary.AutoFit,
+            FontScale = primary.FontScale,
+            LineSpaceReduction = primary.LineSpaceReduction
+        };
+    }
+
+    private static TextProperties CloneTextProperties(TextProperties source)
+    {
+        return new TextProperties
+        {
+            FontSize = source.FontSize,
+            Bold = source.Bold,
+            Italic = source.Italic,
+            FontFamily = source.FontFamily,
+            Color = source.Color,
+            Alignment = source.Alignment,
+            TextDirection = source.TextDirection,
+            Anchor = source.Anchor,
+            WrapText = source.WrapText,
+            LeftInset = source.LeftInset,
+            TopInset = source.TopInset,
+            RightInset = source.RightInset,
+            BottomInset = source.BottomInset,
+            AutoFit = source.AutoFit,
+            FontScale = source.FontScale,
+            LineSpaceReduction = source.LineSpaceReduction
+        };
+    }
+
+    private static List<Paragraph> MergeParagraphs(IEnumerable<Paragraph> paragraphs, TextStyle? textStyle)
+    {
+        var mergedParagraphs = new List<Paragraph>();
+
+        foreach (var paragraph in paragraphs)
+        {
+            var merged = CloneParagraph(paragraph);
+            var styleProperties = textStyle?.GetLevelStyle(merged.Level)?.Properties;
+
+            if (merged.Alignment == null && styleProperties?.Alignment != null)
+                merged.Alignment = styleProperties.Alignment;
+
+            if (merged.MarginLeft == 0 && styleProperties?.LeftMargin.HasValue == true)
+                merged.MarginLeft = ToEmu(styleProperties.LeftMargin.Value);
+
+            if (merged.MarginRight == 0 && styleProperties?.RightMargin.HasValue == true)
+                merged.MarginRight = ToEmu(styleProperties.RightMargin.Value);
+
+            if (merged.Indent == 0 && styleProperties?.Indent.HasValue == true)
+                merged.Indent = ToEmu(styleProperties.Indent.Value);
+
+            if (merged.DefaultTabSize == 914400 && styleProperties?.DefaultTabSize.HasValue == true)
+                merged.DefaultTabSize = ToEmu(styleProperties.DefaultTabSize.Value);
+
+            if (!merged.HasExplicitBulletDefinition && styleProperties?.Bullet != null)
+            {
+                ApplyBulletStyle(merged, styleProperties.Bullet);
+            }
+
+            ApplyDefaultRunProperties(merged, styleProperties?.DefaultRunProperties);
+            mergedParagraphs.Add(merged);
+        }
+
+        return mergedParagraphs;
+    }
+
+    private static Paragraph CloneParagraph(Paragraph source)
+    {
+        return new Paragraph
+        {
+            Alignment = source.Alignment,
+            Level = source.Level,
+            DefaultTabSize = source.DefaultTabSize,
+            RightToLeft = source.RightToLeft,
+            EastAsianLineBreak = source.EastAsianLineBreak,
+            LatinLineBreak = source.LatinLineBreak,
+            HangingPunctuation = source.HangingPunctuation,
+            MarginLeft = source.MarginLeft,
+            MarginRight = source.MarginRight,
+            Indent = source.Indent,
+            LineSpacing = CloneSpacing(source.LineSpacing),
+            SpaceBefore = CloneSpacing(source.SpaceBefore),
+            SpaceAfter = CloneSpacing(source.SpaceAfter),
+            BulletType = source.BulletType,
+            HasExplicitBulletDefinition = source.HasExplicitBulletDefinition,
+            BulletChar = source.BulletChar,
+            BulletAutoNumberType = source.BulletAutoNumberType,
+            BulletStartAt = source.BulletStartAt,
+            BulletSize = source.BulletSize,
+            BulletFont = source.BulletFont,
+            BulletColor = source.BulletColor,
+            Runs = source.Runs.Select(CloneRun).ToList()
+        };
+    }
+
+    private static Spacing? CloneSpacing(Spacing? spacing)
+    {
+        if (spacing == null)
+            return null;
+
+        return new Spacing
+        {
+            Percent = spacing.Percent,
+            Points = spacing.Points
+        };
+    }
+
+    private static Run CloneRun(Run source)
+    {
+        return new Run
+        {
+            Text = source.Text,
+            Properties = source.Properties == null ? null : CloneRunProperties(source.Properties)
+        };
+    }
+
+    private static RunProperties CloneRunProperties(RunProperties source)
+    {
+        return new RunProperties
+        {
+            FontSize = source.FontSize,
+            Bold = source.Bold,
+            Italic = source.Italic,
+            Underline = source.Underline,
+            Strike = source.Strike,
+            Caps = source.Caps,
+            FontFamily = source.FontFamily,
+            EastAsianFont = source.EastAsianFont,
+            ComplexScriptFont = source.ComplexScriptFont,
+            Color = source.Color,
+            HighlightColor = source.HighlightColor,
+            Language = source.Language,
+            BaselineOffset = source.BaselineOffset
+        };
+    }
+
+    private static void ApplyBulletStyle(Paragraph paragraph, BulletStyle bulletStyle)
+    {
+        paragraph.BulletType = bulletStyle.Type;
+        paragraph.BulletChar ??= bulletStyle.Character;
+        paragraph.BulletAutoNumberType ??= bulletStyle.AutoNumberType;
+        if (paragraph.BulletStartAt == 1 && bulletStyle.StartAt.HasValue)
+        {
+            paragraph.BulletStartAt = bulletStyle.StartAt.Value;
+        }
+
+        paragraph.BulletColor ??= bulletStyle.Color;
+        paragraph.BulletFont ??= bulletStyle.Font;
+        if (Math.Abs(paragraph.BulletSize - 1) < 0.0001 && bulletStyle.Size.HasValue)
+        {
+            paragraph.BulletSize = bulletStyle.Size.Value;
+        }
+    }
+
+    private static void ApplyDefaultRunProperties(Paragraph paragraph, TextRunProperties? defaultRunProperties)
+    {
+        if (defaultRunProperties == null)
+            return;
+
+        foreach (var run in paragraph.Runs)
+        {
+            run.Properties ??= new RunProperties();
+            run.Properties.FontSize ??= defaultRunProperties.FontSize.HasValue
+                ? (int)Math.Round(defaultRunProperties.FontSize.Value)
+                : null;
+            run.Properties.FontFamily ??= defaultRunProperties.Typeface;
+            run.Properties.Color ??= defaultRunProperties.Color;
+            run.Properties.Language ??= defaultRunProperties.Language;
+        }
+    }
+
+    private static long ToEmu(double points)
+    {
+        return (long)Math.Round(points * 12700.0);
+    }
+
+    private sealed class ResolverScope : IDisposable
+    {
+        private readonly Action _onDispose;
+        private bool _disposed;
+
+        public ResolverScope(Action onDispose)
+        {
+            _onDispose = onDispose;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+            _onDispose();
+        }
     }
 }

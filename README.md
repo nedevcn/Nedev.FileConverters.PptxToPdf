@@ -5,7 +5,7 @@ A high-performance .NET library for converting PPTX (PowerPoint) files to PDF **
 ## Features
 
 - **Zero Dependencies**: No external NuGet packages required for core functionality
-- **Core Integration**: Implements `IFileConverter` from `Nedev.FileConverters.Core`
+- **Core Integration**: Supports `Nedev.FileConverters.Core` via explicit registration plus `IFileConverter` adapter
 - **Multi-Target**: Supports both .NET 8.0 and .NET Standard 2.1
 - **Parallel Processing**: Optional slide-level parallelization for faster conversion
 - **Stream-Based**: Support for both file path and stream-based conversion
@@ -20,7 +20,7 @@ A high-performance .NET library for converting PPTX (PowerPoint) files to PDF **
 | Slide rendering | ✅ Complete | End-to-end conversion chain |
 | PDF output | ✅ Complete | Standard PDF generation |
 | Library API | ✅ Complete | Simple `Convert()` method with file path or stream |
-| CLI tool | ✅ Complete | `Nedev.FileConverters.PptxToPdf.Cli` with `--parallel` flag |
+| CLI tool | ✅ Complete | `Nedev.FileConverters.PptxToPdf.Cli` with `--parallel` and `--core` registration modes |
 
 ### PPTX Parsing
 | Feature | Status | Notes |
@@ -78,7 +78,8 @@ A high-performance .NET library for converting PPTX (PowerPoint) files to PDF **
 |---------|--------|-------|
 | JPEG | ✅ Native | Passed through directly |
 | PNG | ⚠️ Simplified | Decoded to raw pixels & re-encoded |
-| GIF / BMP / TIFF | ⚠️ Simplified | Pixel extraction with placeholder fallback |
+| BMP | ✅ Complete | Lossless pixel extraction with alpha-mask support |
+| GIF / TIFF | ⚠️ Unsupported | Unsupported images are skipped instead of embedding placeholder pixels |
 | Image effects (shadow, glow, reflection, bevel, soft edges, 3-D rotation) | ⚠️ Approximate | |
 
 ### Table Rendering
@@ -109,7 +110,7 @@ A high-performance .NET library for converting PPTX (PowerPoint) files to PDF **
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Solid color background | ✅ Complete | |
-| Gradient / image background | ❌ Not yet | Only solid fill parsed |
+| Gradient / image background | ⚠️ Partial | Solid and gradient backgrounds render; image backgrounds remain unimplemented |
 
 ### Performance
 | Feature | Status | Notes |
@@ -135,15 +136,29 @@ dotnet build src/Nedev.FileConverters.PptxToPdf/Nedev.FileConverters.PptxToPdf.c
 
 ## Usage
 
-### Using Core Package (Recommended)
+### Using Nedev.FileConverters.Core
 
 ```csharp
 using Nedev.FileConverters;
+using Nedev.FileConverters.PptxToPdf;
 
-// Automatic discovery via FileConverter attribute
+PptxToPdfCoreRegistration.EnsureRegistered();
+
 using var inputStream = File.OpenRead("input.pptx");
-using var outputStream = File.Create("output.pdf");
 using var convertedStream = Converter.Convert(inputStream, "pptx", "pdf");
+using var outputStream = File.Create("output.pdf");
+convertedStream.CopyTo(outputStream);
+```
+
+### Using The Adapter Directly
+
+```csharp
+using Nedev.FileConverters.PptxToPdf;
+
+using var inputStream = File.OpenRead("input.pptx");
+var fileConverter = new PptxToPdfFileConverter();
+using var convertedStream = fileConverter.Convert(inputStream);
+using var outputStream = File.Create("output.pdf");
 convertedStream.CopyTo(outputStream);
 ```
 
@@ -158,7 +173,7 @@ var converter = new PptxToPdfConverter();
 converter.Convert("input.pptx", "output.pdf");
 
 // Parallel mode (faster for large decks)
-converter.Convert("input.pptx", "output.pdf", parallel: true);
+converter.Convert("input.pptx", "output.pdf", useParallelProcessing: true);
 
 // Stream-based conversion
 using var input = File.OpenRead("input.pptx");
@@ -175,7 +190,7 @@ Nedev.FileConverters.PptxToPdf.Cli input.pptx output.pdf
 # With parallel processing
 Nedev.FileConverters.PptxToPdf.Cli input.pptx output.pdf --parallel
 
-# Using Core package's Converter
+# Using the Core package entry point
 Nedev.FileConverters.PptxToPdf.Cli input.pptx output.pdf --core
 
 # Help

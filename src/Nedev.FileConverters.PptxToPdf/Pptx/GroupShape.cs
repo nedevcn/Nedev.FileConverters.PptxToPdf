@@ -10,15 +10,17 @@ public class GroupShape
 
     public string? Id { get; }
     public string? Name { get; }
+    public string? SourcePath { get; }
     public Rect Bounds { get; }
     public List<Shape> Shapes { get; } = new();
     public List<Picture> Pictures { get; } = new();
     public List<GroupShape> ChildGroups { get; } = new();
     public List<Table> Tables { get; } = new();
 
-    public GroupShape(XElement element)
+    public GroupShape(XElement element, string? sourcePath = null)
     {
         _element = element;
+        SourcePath = sourcePath;
 
         var nvGrpSpPr = element.Element(P + "nvGrpSpPr");
         if (nvGrpSpPr != null)
@@ -70,7 +72,7 @@ public class GroupShape
     {
         foreach (var sp in parent.Elements(P + "sp"))
         {
-            var shape = new Shape(sp);
+            var shape = new Shape(sp, SourcePath);
             if (!shape.IsPlaceholder || shape.HasText)
             {
                 Shapes.Add(shape);
@@ -79,12 +81,12 @@ public class GroupShape
 
         foreach (var pic in parent.Elements(P + "pic"))
         {
-            Pictures.Add(new Picture(pic));
+            Pictures.Add(new Picture(pic, SourcePath));
         }
 
         foreach (var grpSp in parent.Elements(P + "grpSp"))
         {
-            ChildGroups.Add(new GroupShape(grpSp));
+            ChildGroups.Add(new GroupShape(grpSp, SourcePath));
         }
 
         foreach (var graphicFrame in parent.Elements(P + "graphicFrame"))

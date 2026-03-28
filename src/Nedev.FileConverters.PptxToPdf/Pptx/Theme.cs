@@ -8,21 +8,24 @@ public class Theme
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
     public string? Name { get; }
+    public string? SourcePath { get; }
     public ColorScheme ColorScheme { get; }
     public FontScheme FontScheme { get; }
     public EffectScheme EffectScheme { get; }
     public FormatScheme FormatScheme { get; }
 
-    public Theme(XElement element)
+    public Theme(XElement element, string? sourcePath = null)
     {
         _element = element;
         Name = element.Attribute("name")?.Value;
+        SourcePath = sourcePath;
 
         var themeElements = element.Element(A + "themeElements");
         if (themeElements != null)
         {
             ColorScheme = new ColorScheme(themeElements.Element(A + "clrScheme"));
             FontScheme = new FontScheme(themeElements.Element(A + "fontScheme"));
+            using var _ = Shape.UseSchemeColorResolver(ColorScheme.GetColor);
             EffectScheme = new EffectScheme(themeElements.Element(A + "effectScheme"));
             FormatScheme = new FormatScheme(themeElements.Element(A + "fmtScheme"));
         }
@@ -363,7 +366,7 @@ public class FillStyle
     {
         _element = element;
         Type = ParseFillType(element.Name.LocalName);
-        Fill = Shape.ParseFill(element);
+        Fill = ParseFillElement(element);
     }
 
     private static FillType ParseFillType(string name)
@@ -377,6 +380,12 @@ public class FillStyle
             "noFill" => FillType.None,
             _ => FillType.None
         };
+    }
+
+    private static Fill? ParseFillElement(XElement element)
+    {
+        var wrapper = new XElement(element.Name.Namespace + "spPr", new XElement(element));
+        return Shape.ParseFill(wrapper);
     }
 }
 
@@ -440,7 +449,7 @@ public class BackgroundFillStyle
     {
         _element = element;
         Type = ParseFillType(element.Name.LocalName);
-        Fill = Shape.ParseFill(element);
+        Fill = ParseFillElement(element);
     }
 
     private static FillType ParseFillType(string name)
@@ -454,5 +463,11 @@ public class BackgroundFillStyle
             "noFill" => FillType.None,
             _ => FillType.None
         };
+    }
+
+    private static Fill? ParseFillElement(XElement element)
+    {
+        var wrapper = new XElement(element.Name.Namespace + "spPr", new XElement(element));
+        return Shape.ParseFill(wrapper);
     }
 }

@@ -9,12 +9,12 @@ public class Chart
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
     public string? Title { get; }
-    public ChartType Type { get; }
+    public ChartType Type { get; } = ChartType.Unknown;
     public List<ChartSeries> Series { get; } = new();
     public ChartAxis? CategoryAxis { get; }
     public ChartAxis? ValueAxis { get; }
     public ChartLegend? Legend { get; }
-    public ChartPlotArea PlotArea { get; }
+    public ChartPlotArea? PlotArea { get; }
     public Rect Bounds { get; }
 
     public Chart(XElement element, Rect bounds)
@@ -23,19 +23,19 @@ public class Chart
         Bounds = bounds;
 
         // Parse chart space
-        var chartSpace = element.Element(C + "chartSpace");
+        var chartSpace = element.Name == C + "chartSpace" ? element : element.Element(C + "chartSpace");
         if (chartSpace == null) return;
-
-        // Parse title
-        var title = chartSpace.Element(C + "title");
-        if (title != null)
-        {
-            Title = ParseTitle(title);
-        }
 
         // Parse chart
         var chart = chartSpace.Element(C + "chart");
         if (chart == null) return;
+
+        // Parse title
+        var title = chart.Element(C + "title");
+        if (title != null)
+        {
+            Title = ParseTitle(title);
+        }
 
         // Parse plot area
         var plotArea = chart.Element(C + "plotArea");
@@ -66,11 +66,8 @@ public class Chart
 
     private static string? ParseTitle(XElement title)
     {
-        var tx = title.Element(title.Name.Namespace + "tx");
-        var rich = tx?.Element(title.Name.Namespace + "rich");
-        var p = rich?.Element(title.Name.Namespace + "p");
-        var r = p?.Element(title.Name.Namespace + "r");
-        return r?.Element(title.Name.Namespace + "t")?.Value;
+        var text = title.Descendants().FirstOrDefault(element => element.Name.LocalName is "t" or "v")?.Value;
+        return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 }
 
@@ -128,8 +125,8 @@ public class ChartPlotArea
             switch (child.Name.LocalName)
             {
                 case "barChart":
-                    Type = ChartType.Bar;
-                    ParseBarChart(child);
+                    Type = GetBarChartType(child);
+                    ParseBarChart(child, Type);
                     break;
                 case "lineChart":
                     Type = ChartType.Line;
@@ -167,11 +164,20 @@ public class ChartPlotArea
         }
     }
 
-    private void ParseBarChart(XElement barChart)
+    private static ChartType GetBarChartType(XElement barChart)
+    {
+        return barChart.Element(C + "barDir")?.Attribute("val")?.Value switch
+        {
+            "col" => ChartType.Column,
+            _ => ChartType.Bar
+        };
+    }
+
+    private void ParseBarChart(XElement barChart, ChartType chartType)
     {
         foreach (var ser in barChart.Elements(C + "ser"))
         {
-            Series.Add(new ChartSeries(ser, ChartType.Bar));
+            Series.Add(new ChartSeries(ser, chartType));
         }
     }
 

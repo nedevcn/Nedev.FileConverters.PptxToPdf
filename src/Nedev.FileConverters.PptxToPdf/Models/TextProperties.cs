@@ -11,7 +11,7 @@ public class TextProperties
 
     // Extended properties
     public TextDirection TextDirection { get; set; } = TextDirection.Horizontal;
-    public TextAnchor Anchor { get; set; } = TextAnchor.Middle;
+    public TextAnchor Anchor { get; set; } = TextAnchor.Top;
     public bool WrapText { get; set; } = true;
 
     // Margins (in inches)

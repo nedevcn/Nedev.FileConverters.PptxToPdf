@@ -5,26 +5,49 @@ namespace Nedev.FileConverters.PptxToPdf.Pptx;
 public class SmartArt
 {
     private readonly XElement _element;
-    private static readonly XNamespace D = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    private static readonly XNamespace P = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    private static readonly XNamespace D = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
 
     public string? Type { get; }
+    public SmartArtType ResolvedType { get; }
+    public string? DisplayName { get; }
     public Rect Bounds { get; }
     public List<SmartArtNode> Nodes { get; } = new();
     public List<SmartArtConnection> Connections { get; } = new();
     public SmartArtLayout? Layout { get; }
 
     public SmartArt(XElement element, Rect bounds)
+        : this(ResolveDataModel(element), ResolveLayoutDef(element), bounds)
     {
-        _element = element;
+    }
+
+    public SmartArt(XElement? dataModelElement, XElement? layoutDefElement, Rect bounds)
+    {
+        _element = dataModelElement ?? layoutDefElement ?? new XElement(D + "smartArt");
         Bounds = bounds;
 
-        // Parse data model
-        var dataModel = element.Element(D + "dataModel");
-        if (dataModel == null) return;
+        var dataModel = ResolveDataModel(dataModelElement);
+        if (dataModel != null)
+        {
+            ParseDataModel(dataModel);
+        }
 
-        // Parse point list (nodes)
+        var layoutDef = ResolveLayoutDef(layoutDefElement);
+        if (layoutDef != null)
+        {
+            Layout = new SmartArtLayout(layoutDef);
+        }
+
+        Type = layoutDef?.Attribute("uniqueId")?.Value
+            ?? layoutDefElement?.Attribute("uniqueId")?.Value
+            ?? dataModelElement?.Attribute("uniqueId")?.Value;
+        ResolvedType = ResolveSmartArtType(Type, Layout?.Name, Layout?.Description, Layout?.Category);
+        DisplayName = Layout?.Name
+            ?? (ResolvedType != SmartArtType.Unknown ? GetDisplayName(ResolvedType) : Type);
+    }
+
+    private void ParseDataModel(XElement dataModel)
+    {
         var ptLst = dataModel.Element(D + "ptLst");
         if (ptLst != null)
         {
@@ -34,7 +57,6 @@ public class SmartArt
             }
         }
 
-        // Parse connection list
         var cxnLst = dataModel.Element(D + "cxnLst");
         if (cxnLst != null)
         {
@@ -43,57 +65,95 @@ public class SmartArt
                 Connections.Add(new SmartArtConnection(cxn));
             }
         }
+    }
 
-        // Parse layout definition
-        var layoutDef = element.Element(D + "layoutDef");
-        if (layoutDef != null)
+    private static XElement? ResolveDataModel(XElement? element)
+    {
+        if (element == null)
+            return null;
+
+        return element.Name == D + "dataModel"
+            ? element
+            : element.Element(D + "dataModel");
+    }
+
+    private static XElement? ResolveLayoutDef(XElement? element)
+    {
+        if (element == null)
+            return null;
+
+        return element.Name == D + "layoutDef"
+            ? element
+            : element.Element(D + "layoutDef");
+    }
+
+    public static SmartArtType ResolveSmartArtType(params string?[] candidates)
+    {
+        foreach (var candidate in candidates)
         {
-            Layout = new SmartArtLayout(layoutDef);
+            var resolved = GetSmartArtType(candidate);
+            if (resolved != SmartArtType.Unknown)
+                return resolved;
         }
 
-        // Determine SmartArt type from uniqueId
-        var uniqueId = element.Attribute("uniqueId")?.Value;
-        Type = uniqueId;
+        return SmartArtType.Unknown;
     }
 
     public static SmartArtType GetSmartArtType(string? uniqueId)
     {
-        if (uniqueId == null) return SmartArtType.Unknown;
+        if (string.IsNullOrWhiteSpace(uniqueId))
+            return SmartArtType.Unknown;
 
         return uniqueId switch
         {
             // List types
-            var s when s.Contains("List") => SmartArtType.List,
-            var s when s.Contains("VerticalBulletList") => SmartArtType.VerticalBulletList,
-            var s when s.Contains("HorizontalBulletList") => SmartArtType.HorizontalBulletList,
+            var s when s.Contains("VerticalBulletList", StringComparison.OrdinalIgnoreCase) => SmartArtType.VerticalBulletList,
+            var s when s.Contains("HorizontalBulletList", StringComparison.OrdinalIgnoreCase) => SmartArtType.HorizontalBulletList,
+            var s when s.Contains("List", StringComparison.OrdinalIgnoreCase) => SmartArtType.List,
 
             // Process types
-            var s when s.Contains("Process") => SmartArtType.Process,
-            var s when s.Contains("BasicProcess") => SmartArtType.BasicProcess,
-            var s when s.Contains("ContinuousBlockProcess") => SmartArtType.ContinuousBlockProcess,
+            var s when s.Contains("ContinuousBlockProcess", StringComparison.OrdinalIgnoreCase) => SmartArtType.ContinuousBlockProcess,
+            var s when s.Contains("BasicProcess", StringComparison.OrdinalIgnoreCase) => SmartArtType.BasicProcess,
+            var s when s.Contains("Process", StringComparison.OrdinalIgnoreCase) => SmartArtType.Process,
 
             // Cycle types
-            var s when s.Contains("Cycle") => SmartArtType.Cycle,
-            var s when s.Contains("BasicCycle") => SmartArtType.BasicCycle,
+            var s when s.Contains("BasicCycle", StringComparison.OrdinalIgnoreCase) => SmartArtType.BasicCycle,
+            var s when s.Contains("Cycle", StringComparison.OrdinalIgnoreCase) => SmartArtType.Cycle,
 
             // Hierarchy types
-            var s when s.Contains("Hierarchy") => SmartArtType.Hierarchy,
-            var s when s.Contains("OrganizationChart") => SmartArtType.OrganizationChart,
+            var s when s.Contains("OrganizationChart", StringComparison.OrdinalIgnoreCase) => SmartArtType.OrganizationChart,
+            var s when s.Contains("Hierarchy", StringComparison.OrdinalIgnoreCase) => SmartArtType.Hierarchy,
 
             // Relationship types
-            var s when s.Contains("Relationship") => SmartArtType.Relationship,
-            var s when s.Contains("BasicTarget") => SmartArtType.BasicTarget,
+            var s when s.Contains("BasicTarget", StringComparison.OrdinalIgnoreCase) => SmartArtType.BasicTarget,
+            var s when s.Contains("Relationship", StringComparison.OrdinalIgnoreCase) => SmartArtType.Relationship,
 
             // Matrix types
-            var s when s.Contains("Matrix") => SmartArtType.Matrix,
+            var s when s.Contains("Matrix", StringComparison.OrdinalIgnoreCase) => SmartArtType.Matrix,
 
             // Pyramid types
-            var s when s.Contains("Pyramid") => SmartArtType.Pyramid,
+            var s when s.Contains("Pyramid", StringComparison.OrdinalIgnoreCase) => SmartArtType.Pyramid,
 
             // Picture types
-            var s when s.Contains("Picture") => SmartArtType.Picture,
+            var s when s.Contains("Picture", StringComparison.OrdinalIgnoreCase) => SmartArtType.Picture,
 
             _ => SmartArtType.Unknown
+        };
+    }
+
+    public static string GetDisplayName(SmartArtType type)
+    {
+        return type switch
+        {
+            SmartArtType.VerticalBulletList => "Vertical Bullet List",
+            SmartArtType.HorizontalBulletList => "Horizontal Bullet List",
+            SmartArtType.BasicProcess => "Basic Process",
+            SmartArtType.ContinuousBlockProcess => "Continuous Block Process",
+            SmartArtType.OrganizationChart => "Organization Chart",
+            SmartArtType.BasicCycle => "Basic Cycle",
+            SmartArtType.BasicTarget => "Basic Target",
+            SmartArtType.Unknown => "SmartArt",
+            _ => type.ToString()
         };
     }
 }
@@ -121,6 +181,7 @@ public enum SmartArtType
 public class SmartArtNode
 {
     private readonly XElement _element;
+    private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace D = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
 
     public string? Id { get; }
@@ -165,31 +226,54 @@ public class SmartArtNode
 
     private void ParseTextWithFormatting(XElement txBody)
     {
-        var a = txBody.Name.Namespace;
-        var p = txBody.Element(a + "p");
-        if (p == null) return;
+        var paragraphs = txBody.Elements(A + "p").ToList();
+        if (paragraphs.Count == 0)
+        {
+            paragraphs = txBody.Descendants(A + "p").ToList();
+        }
+
+        if (paragraphs.Count == 0) return;
 
         var text = "";
-        foreach (var r in p.Elements(a + "r"))
+        for (int paragraphIndex = 0; paragraphIndex < paragraphs.Count; paragraphIndex++)
         {
-            var t = r.Element(a + "t");
-            if (t != null)
+            var p = paragraphs[paragraphIndex];
+            if (paragraphIndex > 0 && text.Length > 0)
             {
+                text += "\n";
+                TextRuns.Add(SmartArtTextRun.LineBreak());
+            }
+
+            foreach (var child in p.Elements())
+            {
+                if (child.Name == A + "br")
+                {
+                    text += "\n";
+                    TextRuns.Add(SmartArtTextRun.LineBreak());
+                    continue;
+                }
+
+                if (child.Name != A + "r")
+                    continue;
+
+                var t = child.Element(A + "t");
+                if (t == null)
+                    continue;
+
                 var textValue = t.Value;
                 text += textValue;
 
-                // Parse text formatting
-                var rPr = r.Element(a + "rPr");
+                var rPr = child.Element(A + "rPr");
                 var bold = rPr?.Attribute("b")?.Value == "1";
                 var italic = rPr?.Attribute("i")?.Value == "1";
                 var underline = rPr?.Attribute("u")?.Value == "single";
-                var fontSize = rPr?.Attribute("sz") != null ? int.Parse(rPr.Attribute("sz").Value) / 100 : 12;
-                var color = "000000"; // Default black
-                
-                var solidFill = rPr?.Element(a + "solidFill");
+                var fontSize = int.TryParse(rPr?.Attribute("sz")?.Value, out var size) ? size / 100 : 12;
+                var color = "000000";
+
+                var solidFill = rPr?.Element(A + "solidFill");
                 if (solidFill != null)
                 {
-                    var srgbClr = solidFill.Element(a + "srgbClr");
+                    var srgbClr = solidFill.Element(A + "srgbClr");
                     if (srgbClr != null)
                     {
                         color = srgbClr.Attribute("val")?.Value ?? "000000";
@@ -207,6 +291,7 @@ public class SmartArtNode
 public class SmartArtTextRun
 {
     public string Text { get; }
+    public bool IsLineBreak => Text == "\n";
     public bool Bold { get; }
     public bool Italic { get; }
     public bool Underline { get; }
@@ -221,6 +306,11 @@ public class SmartArtTextRun
         Underline = underline;
         FontSize = fontSize;
         Color = color;
+    }
+
+    public static SmartArtTextRun LineBreak(int fontSize = 12, string color = "000000")
+    {
+        return new SmartArtTextRun("\n", false, false, false, fontSize, color);
     }
 }
 
